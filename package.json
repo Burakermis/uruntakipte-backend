@@ -1,0 +1,36 @@
+{
+  "name": "inditex-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Fiyat/stok takip backend API (Faz 1)",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "worker": "node queue/worker-process.js",
+    "test:zara": "node test-zara.js",
+    "test:hm": "node test-hm.js",
+    "test:pullandbear": "node test-pullandbear.js",
+    "test:bershka": "node test-bershka.js",
+    "test:mango": "node test-mango.js",
+    "test:massimodutti": "node test-massimodutti.js",
+    "test:stradivarius": "node test-stradivarius.js",
+    "test:oysho": "node test-oysho.js",
+    "test:all": "node test-zara.js && node test-hm.js && node test-pullandbear.js && node test-bershka.js && node test-mango.js && node test-massimodutti.js && node test-stradivarius.js && node test-oysho.js"
+  },
+  "dependencies": {
+    "bullmq": "^6.1.2",
+    "cheerio": "^1.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.6.2",
+    "ioredis": "^6.0.0",
+    "p-limit": "^3.1.0",
+    "pg": "^8.23.0",
+    "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
+    "playwright": "^1.62.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
