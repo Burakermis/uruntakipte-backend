@@ -145,9 +145,26 @@ function parseMangoProduct(html, sourceUrl) {
   // ".../56/00" (Lacivert) diyebiliyor. Bu yüzden ürün/renk kimliğini
   // gerçekten istek attığımız sourceUrl'den çıkarıyoruz; meta.canonicalUrl
   // sadece isim/görsel meta verisi için kullanılıyor.
-  const { productId, colorId } = parseUrlSegments(sourceUrl);
+  let pageUrl = sourceUrl;
+  let { productId, colorId } = parseUrlSegments(pageUrl);
+  // İSTİSNA: eski biçimli URL'ler (".../<slug>_17021231", arama motorlarında
+  // ve eski paylaşımlarda hâlâ dolaşıyor) sitede yeni biçime yönleniyor ama
+  // istek URL'inde ürün/renk kodu YOK. Canlı testte bu durumda productId'nin
+  // URL'in kendisi, SKU'nun "mango-Lacivert-S" olduğu görüldü; kalıcı URL de
+  // eski biçimde kaldığından aynı ürünün yeni biçimli URL'iyle aynı hedefe
+  // eşlenmiyordu (bkz. routes/products.js dedup anahtarı). Yönlenen sayfa
+  // (canonical'ın da işaret ettiği varsayılan renk sayfası) yeni biçimde
+  // olduğundan, SADECE bu durumda kimliği canonical'dan alıyoruz; yukarıdaki
+  // "canonical yanıltıcı olabilir" uyarısı istek URL'i kodluyken hâlâ geçerli.
+  if (!productId) {
+    const fromCanonical = parseUrlSegments(meta.canonicalUrl);
+    if (fromCanonical.productId) {
+      ({ productId, colorId } = fromCanonical);
+      pageUrl = meta.canonicalUrl;
+    }
+  }
   const colorName = extractColorName($) || 'Tek Renk';
-  const relatedColors = extractRelatedColors($, sourceUrl);
+  const relatedColors = extractRelatedColors($, pageUrl);
 
   if (!productId && sizeEntries.length === 0 && price == null) {
     return null;
@@ -160,7 +177,7 @@ function parseMangoProduct(html, sourceUrl) {
     price,
     currency,
     availability: entry.availability,
-    url: sourceUrl,
+    url: pageUrl,
   }));
 
   return {
@@ -168,7 +185,7 @@ function parseMangoProduct(html, sourceUrl) {
     name: meta.name,
     brand: 'Mango',
     imageUrl: meta.imageUrl,
-    canonicalUrl: sourceUrl,
+    canonicalUrl: pageUrl,
     checkedAt: new Date().toISOString(),
     variants,
     relatedColors,

@@ -2,6 +2,11 @@
 // fetch() ile — aynı ürünün farklı bedenlerinin ücretsiz plan limitinde TEK
 // slot sayıldığını doğrular (bkz. store/subscriptionStore.js'in
 // countActiveByUser'ının artık DISTINCT target_id sayması).
+//
+// Fixture HTML'ini istemci gövdesiyle gönderdiği için sunucunun (API süreci)
+// ALLOW_CLIENT_HTML=1 ile başlatılmış olması gerekir — o akış varsayılan olarak
+// kapalı (bkz. routes/products.js clientHtmlAllowed). İzole bir test
+// veritabanına karşı çalıştırın: test kullanıcıları/hedefleri oluşturur.
 const fs = require('fs');
 
 const BASE = 'http://localhost:4000/api';

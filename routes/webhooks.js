@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const userStore = require('../store/userStore');
 const logger = require('../logger');
@@ -22,10 +23,16 @@ const PREMIUM_DEACTIVATING_EVENTS = new Set(['EXPIRATION']);
 
 function isAuthorized(req) {
   const expected = process.env.REVENUECAT_WEBHOOK_SECRET;
-  // Secret tanımlanmadıysa (henüz RevenueCat hesabı kurulmadıysa) dev
-  // ortamında engellemiyoruz — prod'a çıkmadan önce mutlaka ayarlanmalı.
-  if (!expected) return true;
-  return req.headers.authorization === `Bearer ${expected}`;
+  // Secret tanımlanmadıysa (henüz RevenueCat hesabı kurulmadıysa) yalnızca
+  // geliştirmede engellemiyoruz. Prod'da ise KAPALI (fail-closed): eskiden secret
+  // unutulunca bu uç kimliksiz açık kalıyordu — canlı testte herhangi biri
+  // INITIAL_PURCHASE göndererek istediği kimliği premium yapabildi.
+  if (!expected) return process.env.NODE_ENV !== 'production';
+  // Sabit zamanlı karşılaştırma: `===` ilk farklı karakterde döndüğü için
+  // secret'ı karakter karakter zamanlama farkından tahmin etmeye açıktı.
+  const provided = Buffer.from(String(req.headers.authorization || ''));
+  const wanted = Buffer.from(`Bearer ${expected}`);
+  return provided.length === wanted.length && crypto.timingSafeEqual(provided, wanted);
 }
 
 // POST /webhooks/revenuecat

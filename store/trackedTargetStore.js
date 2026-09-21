@@ -40,6 +40,13 @@ async function findById(id) {
   return mapRow(rows[0]);
 }
 
+// Birden çok hedefi TEK sorguda getirir (id -> hedef Map'i).
+async function findByIds(ids) {
+  if (ids.length === 0) return new Map();
+  const { rows } = await db.query('SELECT * FROM tracked_targets WHERE id = ANY($1::int[])', [ids.map(Number)]);
+  return new Map(rows.map((row) => [row.id, mapRow(row)]));
+}
+
 async function create({ urlKey, brand, url, productId, name, imageUrl, canonicalUrl, variants, lastCheckedAt, lastCheckStatus }) {
   const { rows } = await db.query(
     `INSERT INTO tracked_targets
@@ -106,4 +113,23 @@ async function update(id, patch) {
   return mapRow(rows[0]);
 }
 
-module.exports = { findByKey, findById, create, addAliasKey, listActive, update };
+// Bir hedefin periyodik taramasını "sahiplenir": last_attempt_at, yalnızca hâlâ
+// çağıranın okuduğu değerdeyse şimdiye çekilir ve true döner. Aynı hedef için
+// eşzamanlı iki iş aynı eski değeri okuduysa YALNIZCA biri kazanır — "sırası
+// geldi mi" kontrolü (checkSchedule.js) ile taramanın kendisi arasında
+// saniyeler var ve last_attempt_at ancak tarama BİTİNCE yazılıyordu; bu
+// yüzden birikmiş işler (worker durup kalkınca) aynı hedefi arka arkaya
+// tarıyordu. Tek UPDATE olduğundan birden çok worker sürecinde de geçerli.
+// date_trunc: JS tarafı milisaniye, Postgres mikrosaniye tutuyor — eşitlik
+// karşılaştırması ondan etkilenmesin.
+async function claimAttempt(target) {
+  const { rows } = await db.query(
+    `UPDATE tracked_targets SET last_attempt_at = $3
+     WHERE id = $1 AND date_trunc('milliseconds', last_attempt_at) IS NOT DISTINCT FROM $2::timestamptz
+     RETURNING id`,
+    [Number(target.id), target.lastAttemptAt, new Date().toISOString()]
+  );
+  return rows.length > 0;
+}
+
+module.exports = { findByKey, findById, findByIds, create, addAliasKey, listActive, update, claimAttempt };

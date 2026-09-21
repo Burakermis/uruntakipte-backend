@@ -24,7 +24,13 @@ function normalizeHostname(hostname) {
 function detectBrand(url) {
   let hostname;
   try {
-    hostname = normalizeHostname(new URL(url).hostname);
+    const parsed = new URL(url);
+    // Yalnızca http(s). Şema doğrulanmıyordu: "file://www.zara.com/...",
+    // "javascript://www.zara.com/%0A..." gibi adresler marka alan adını taşıyıp
+    // tarayıcıya kadar ulaşıyordu (canlı testte file:// bir Windows SMB/UNC
+    // denemesine dönüşüp 22sn'lik bir Chromium slotu tuttu).
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    hostname = normalizeHostname(parsed.hostname);
   } catch {
     return null;
   }
@@ -64,6 +70,13 @@ function normalizeVariantColors(variants) {
 const DEFAULT_FETCH_PROFILE = {
   plainFetchWorks: false,
   flattenShadowDom: false,
+  // true: stealth'siz, pencereli, otomasyon bayrakları kapalı ayrı bir
+  // tarayıcı kullan (bkz. browserFetch.js launchBrowser) — Akamai'nin
+  // headless/stealth'i tanıdığı markalar için (H&M).
+  headed: false,
+  // Küçük (engel gibi görünen) bir belge bu süreden sonra hâlâ sürüyorsa
+  // beklemeyi kes (bkz. browserFetch.js BLOCK_GRACE_MS). null: varsayılan.
+  blockGraceMs: null,
   ready: null,
 };
 

@@ -53,7 +53,16 @@ CREATE TABLE IF NOT EXISTS price_history (
   availability TEXT,
   checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_price_history_target_sku ON price_history (target_id, sku);
+-- previousPrice/previousPrices bir (hedef, sku) çiftinin EN SON kayıtlarını
+-- ister (ORDER BY checked_at DESC LIMIT 50). Toplu sürüm (Ürünlerim listesi)
+-- korelasyonlu alt sorgu kullandığı için planlayıcı checked_at indeksini
+-- geriye tarayıp süzüyordu: 50 ürünlü listede ~400 ms (perf/bench-api.js).
+-- Bu bileşik indeks o taramayı doğrudan (hedef, sku, zaman) sırasında yapar.
+-- Eski (target_id, sku) indeksi bunun öneki olduğundan gereksiz — kaldırılıyor.
+-- NOT: büyük bir tabloda CREATE INDEX yazmaları kısa süre bloklar (şema tek
+-- transaction'da çalıştığı için CONCURRENTLY kullanılamıyor).
+CREATE INDEX IF NOT EXISTS idx_price_history_target_sku_checked ON price_history (target_id, sku, checked_at DESC);
+DROP INDEX IF EXISTS idx_price_history_target_sku;
 CREATE INDEX IF NOT EXISTS idx_price_history_checked_at ON price_history (checked_at);
 
 CREATE TABLE IF NOT EXISTS device_tokens (

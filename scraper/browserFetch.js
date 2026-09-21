@@ -13,13 +13,19 @@ const { brandFetchProfile } = require('./registry');
 // engel. Yine de daha az agresif korumalı siteler için gerçek fayda sağlar.
 chromium.use(StealthPlugin());
 
-let browserPromise = null;
+// stealth eklentisi bulunmayan, düz Playwright — sadece `fetchProfile.headed`
+// markaları için (bkz. launchBrowser).
+const { chromium: plainChromium } = require('playwright');
+
+// mod -> Promise<Browser>. 'headless': stealth'li varsayılan tarayıcı (yedi
+// marka). 'headed': H&M gibi otomasyonu tanıyan markalar için (bkz. aşağıda).
+const browserPromises = new Map();
 
 // Queue kurulana kadar (Faz 2 roadmap) sunucunun aynı anda onlarca Chromium
 // sekmesi açıp belleği/CPU'yu tüketmesini engelleyen ara adım — birden fazla
 // kullanıcı aynı anda YENİ bir ürün eklerse istekler sırayla (en fazla 5
 // tanesi paralel) işlenir, patlamaz.
-const BROWSER_CONCURRENCY = 5;
+const BROWSER_CONCURRENCY = Number(process.env.BROWSER_CONCURRENCY || 5);
 const limit = pLimit(BROWSER_CONCURRENCY);
 
 // Ürün verisi için hiçbirine ihtiyacımız yok — parse ettiğimiz her şey HTML'de.
@@ -38,21 +44,52 @@ const READY_POLL_MS = 100;
 const BLOCK_GRACE_MS = 2000;
 const BLOCKED_HTML_MAX_LENGTH = 5000;
 
-function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = chromium.launch({ headless: true });
+function launchBrowser(mode) {
+  if (mode === 'headed') {
+    // ÖLÇÜM (2026-09-21, H&M): Akamai bu tarayıcıyı ANCAK şu üç koşul birlikte
+    // sağlanınca geçiriyor — biri bile eksikse "Access Denied" (322 bayt):
+    //   1) pencereli mod (headless: paketli Chromium new-headless, gerçek
+    //      Chrome headless ve headless-shell hep engellendi),
+    //   2) `--enable-automation` bayrağı ve `AutomationControlled` özelliği
+    //      kapalı (varsayılan bayraklarla gerçek Chrome bile engellendi),
+    //   3) stealth eklentisi YOK (eklenince, bayraklar kapalıyken bile
+    //      engellendi — eklentinin yamaları kendisi tespit ediliyor).
+    // Bu koşullarla 10/10 canlı sayfa alındı (paketli Chromium ve Chrome).
+    // Pencere ekran dışına açılıyor; Linux sunucuda sanal ekran gerekir
+    // (xvfb-run). Ekran yoksa açılış hata verir ve marka eskisi gibi
+    // FETCH_FAILED döner — diğer markalar etkilenmez.
+    return plainChromium.launch({
+      headless: false,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: ['--disable-blink-features=AutomationControlled', '--window-position=-2400,0'],
+    });
   }
-  return browserPromise;
+  return chromium.launch({ headless: true });
+}
+
+function getBrowser(mode = 'headless') {
+  if (!browserPromises.has(mode)) {
+    const promise = launchBrowser(mode);
+    browserPromises.set(mode, promise);
+    // Açılış başarısız olursa (ör. ekran yok) hata önbelleğe girip sonsuza
+    // kadar tekrarlanmasın; tarayıcı sonradan kapanırsa da (pencereli modda
+    // kullanıcı kapatabilir) bir sonraki istek yenisini açsın.
+    const forget = () => {
+      if (browserPromises.get(mode) === promise) browserPromises.delete(mode);
+    };
+    promise.then((browser) => browser.on('disconnected', forget), forget);
+  }
+  return browserPromises.get(mode);
 }
 
 // Sunucu/worker açılışında çağrılır: ilk ürün ekleyen kullanıcı Chromium'un
 // açılmasını (~0,2-1sn) beklemesin diye tarayıcıyı önden başlatır. Hata
-// olursa sessizce geçiyoruz — ilk gerçek istekte tekrar denenir.
+// olursa sessizce geçiyoruz — ilk gerçek istekte tekrar denenir. Pencereli
+// mod önden AÇILMAZ: ekrana pencere getirir, sadece ilk H&M isteğinde açılır.
 function prewarmBrowser() {
   return getBrowser().then(
     () => logger.info('[browserFetch] Chromium önden başlatıldı'),
     (err) => {
-      browserPromise = null;
       logger.error({ err: err.message }, '[browserFetch] Chromium önden başlatılamadı');
     }
   );
@@ -104,7 +141,7 @@ function nextProxy() {
  *  - Koşul hiç gerçekleşmezse hata FIRLATMIYORUZ: elimizdeki HTML yine de
  *    parse edilir, üst katman (fetchHtml) sonucu değerlendirir.
  */
-async function waitForBrandReady(page, ready, brandId) {
+async function waitForBrandReady(page, ready, brandId, blockGraceMs = BLOCK_GRACE_MS) {
   const start = Date.now();
   const deadline = start + READY_TIMEOUT_MS;
 
@@ -116,7 +153,7 @@ async function waitForBrandReady(page, ready, brandId) {
       // 200 dönebiliyor — status'a bakarak yakalanamıyorlar. Kısa bir
       // toleranstan sonra hâlâ birkaç yüz baytlık bir belge varsa, bu bir
       // ürün sayfası değil: 12sn boyunca beklemenin anlamı yok.
-      if (Date.now() - start > BLOCK_GRACE_MS) {
+      if (Date.now() - start > blockGraceMs) {
         const htmlLength = await page.evaluate(() => document.documentElement.outerHTML.length);
         if (htmlLength < BLOCKED_HTML_MAX_LENGTH) {
           logger.warn({ brandId, htmlLength }, '[browserFetch] sayfa engel/ara sayfası gibi görünüyor, beklemeden çıkılıyor');
@@ -152,12 +189,17 @@ async function fetchHtmlWithBrowserInner(url, { timeoutMs = 25000, warmUp = fals
   const profile = brandFetchProfile(brandId);
   let context;
   try {
-    const browser = await getBrowser();
+    const headed = !!profile.headed;
+    const browser = await getBrowser(headed ? 'headed' : 'headless');
     context = await browser.newContext({
-      userAgent: USER_AGENT,
+      // Pencereli modda tarayıcının kendi UA'sı bırakılıyor: sabit "Chrome/128"
+      // ile gerçek sürüm (sec-ch-ua) arasındaki uyuşmazlık ek bir tutarsızlık
+      // sinyali olurdu; ölçümler de (bkz. launchBrowser) hiç UA ezmeden alındı.
+      ...(headed
+        ? {}
+        : { userAgent: USER_AGENT, extraHTTPHeaders: { 'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8' } }),
       locale: 'tr-TR',
       viewport: { width: 1280, height: 900 },
-      extraHTTPHeaders: { 'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8' },
       proxy: nextProxy(),
     });
 
@@ -223,7 +265,7 @@ async function fetchHtmlWithBrowserInner(url, { timeoutMs = 25000, warmUp = fals
     // fetchProfile.ready). Koşul gerçekleşmezse (site yapısı değiştiyse,
     // bot engeline takıldıysak) sayfa yine de o anki hâliyle parse'a gider.
     if (profile.ready) {
-      await waitForBrandReady(page, profile.ready, brandId);
+      await waitForBrandReady(page, profile.ready, brandId, profile.blockGraceMs ?? BLOCK_GRACE_MS);
     }
 
     // Bazı siteler (örn. Pull&Bear) fiyat/beden gibi kritik veriyi Web
@@ -267,11 +309,14 @@ async function fetchHtmlWithBrowserInner(url, { timeoutMs = 25000, warmUp = fals
 }
 
 async function closeBrowser() {
-  if (browserPromise) {
-    const browser = await browserPromise;
-    browserPromise = null;
-    await browser.close().catch(() => {});
-  }
+  const pending = [...browserPromises.values()];
+  browserPromises.clear();
+  await Promise.all(
+    pending.map(async (promise) => {
+      const browser = await promise.catch(() => null);
+      if (browser) await browser.close().catch(() => {});
+    })
+  );
 }
 
 module.exports = { fetchHtmlWithBrowser, closeBrowser, prewarmBrowser };

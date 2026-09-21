@@ -157,12 +157,17 @@ module.exports = {
   label: 'H&M',
   hostnames: ['hm.com', 'www2.hm.com'],
   parse: (html, url) => parseHmProduct(html, url),
-  // ÖLÇÜM: H&M bu ağdan hem düz fetch'te hem de gerçek Chromium'da 403
-  // "Access Denied" dönüyor (414 baytlık Akamai sayfası) — ısınma navigasyonu
-  // da değiştirmiyor, engel IP/ağ seviyesinde. Bu yüzden düz fetch denemesi
-  // boşuna; tarayıcı da ancak farklı bir çıkış IP'siyle (proxy) ya da
-  // istemci tarafından (telefonun kendi bağlantısı) işe yarar.
+  // ÖLÇÜM: düz fetch 403 alıyor, stealth'li headless Chromium ise HTTP 200 +
+  // 322 baytlık "Access Denied" — ama engel IP'den DEĞİL (aynı IP'den normal
+  // bir tarayıcı sayfayı açıyor), otomasyonun tanınmasından. Stealth'siz,
+  // pencereli, `--enable-automation`sız bir tarayıcıyla 10/10 canlı sayfa
+  // alındı (bkz. browserFetch.js launchBrowser). Düz fetch yine boşuna.
   fetchProfile: {
+    headed: true,
+    // Soğuk bağlamda Akamai'nin ~2,7KB'lık ara sayfası kendi kendine çözülene
+    // kadar 3-5sn sürüyor; varsayılan 2sn bunu "engel" sanıp vazgeçiyordu
+    // (canlı testte ilk istek 12sn'ye uzadı).
+    blockGraceMs: 9000,
     ready: () => !!document.querySelector('ul[data-testid="grid"] li [role="radio"]'),
   },
   // testler için:

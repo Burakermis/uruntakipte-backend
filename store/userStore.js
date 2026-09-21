@@ -24,7 +24,14 @@ async function getOrCreate(userId) {
   return mapRow(rows[0]);
 }
 
+// Önce SADECE OKUR. Eskiden her çağrı bir INSERT ... ON CONFLICT DO UPDATE
+// idi: okuma uçları (GET /users/:id/limits) her seferinde bir yazma + fsync
+// ödüyordu (tek istek 16 ms) ve `id SERIAL` kolonu çakışmada bile bir sayı
+// tüketiyordu — sık çağrılırsa int4 sınırı aylar içinde dolar. Kayıt yalnızca
+// kullanıcı İLK KEZ görüldüğünde açılır (getOrCreate'in eski sözleşmesi).
 async function isPremium(userId) {
+  const { rows } = await db.query('SELECT is_premium FROM users WHERE user_id = $1', [userId]);
+  if (rows[0]) return rows[0].is_premium === true;
   const record = await getOrCreate(userId);
   return record.isPremium === true;
 }

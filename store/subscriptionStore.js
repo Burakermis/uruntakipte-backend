@@ -64,6 +64,25 @@ async function listByTarget(targetId) {
   return rows.map(mapRow);
 }
 
+// Hedef başına "aktif abonelerinden biri premium mu" — tek SORGU, SALT OKUMA.
+// Eskiden checkSchedule her hedef için listByTarget + her abone için
+// userStore.isPremium çağırıyordu ve isPremium her çağrıda bir UPSERT
+// (yazma) yapıyordu: 8.000 hedefte her dakika 24.000 sorgu ve ~15.000 users
+// satırı güncellemesi, üstelik tik boyunca DB havuzu dolu kaldığı için API
+// istekleri saniyelerce bekliyordu (bkz. perf/bench-tick.js, bench-api.js).
+// targetIds verilmezse TÜM hedefler. Aktif abonesi olmayan hedef haritada YOK.
+// users satırı olmayan kullanıcı ücretsiz sayılır (isPremium ile aynı sonuç).
+async function premiumByTarget(targetIds = null) {
+  const { rows } = await db.query(
+    `SELECT s.target_id, COALESCE(bool_or(u.is_premium), false) AS any_premium
+     FROM subscriptions s LEFT JOIN users u ON u.user_id = s.user_id
+     WHERE s.active = true AND ($1::int[] IS NULL OR s.target_id = ANY($1::int[]))
+     GROUP BY s.target_id`,
+    [targetIds ? targetIds.map(Number) : null]
+  );
+  return new Map(rows.map((r) => [r.target_id, r.any_premium]));
+}
+
 async function countActiveByTarget(targetId) {
   const { rows } = await db.query('SELECT COUNT(*)::int AS count FROM subscriptions WHERE target_id = $1 AND active = true', [Number(targetId)]);
   return rows[0].count;
@@ -144,6 +163,7 @@ module.exports = {
   create,
   listByUser,
   listByTarget,
+  premiumByTarget,
   countActiveByTarget,
   countActiveByUser,
   hasActiveSubscriptionForTarget,

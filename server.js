@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const pinoHttp = require('pino-http');
 const logger = require('./logger');
+const { createRequestLogger } = require('./middleware/requestLog');
 const productsRouter = require('./routes/products');
 const devicesRouter = require('./routes/devices');
 const usersRouter = require('./routes/users');
@@ -17,9 +17,14 @@ const { productsLimiter, generalLimiter } = require('./middleware/rateLimit');
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // günde bir kez yeter
 
 const app = express();
+app.disable('x-powered-by'); // sunucu yığınını ilan etmeye gerek yok
 app.use(cors());
-app.use(pinoHttp({ logger }));
-app.use(express.json({ limit: '5mb' })); // HTML gövdesi büyük olabilir (test/dev akışı)
+// Kimlik başlıkları ve userId maskeli loglanır (bkz. middleware/requestLog.js).
+app.use(createRequestLogger(logger));
+// Büyük gövde (5MB) yalnızca istemcinin kendi HTML'ini gönderebildiği geliştirme
+// akışı için gerekiyor (bkz. routes/products.js clientHtmlAllowed); prod'da o
+// akış kapalı ve hiçbir uç 100KB'tan büyük JSON beklemiyor.
+app.use(express.json({ limit: process.env.ALLOW_CLIENT_HTML === '1' ? '5mb' : '100kb' }));
 app.use(generalLimiter);
 
 app.get('/api/health', (_req, res) => {
@@ -65,6 +70,17 @@ if (require.main === module) {
     // Şema idempotent (CREATE TABLE IF NOT EXISTS) — her açılışta çalıştırmak
     // güvenli, ayrı bir migration adımı gerektirmiyor (bkz. store/db.js).
     await db.migrate();
+
+    // NODE_ENV=production DEĞİLSE aşağıdakiler AÇIK kalır: kimliksiz premium
+    // verebilen /users/:id/premium ucu, engelli sayfalar için eski fixture
+    // yedeği ve (secret tanımlı değilse) kimliksiz RevenueCat webhook'u. Bir
+    // dağıtımda NODE_ENV unutulursa bunlar sessizce açık kalıyordu.
+    if (process.env.NODE_ENV !== 'production') {
+      logger.warn(
+        { nodeEnv: process.env.NODE_ENV || '(tanımsız)' },
+        '[server] NODE_ENV=production değil: dev-premium ucu, fixture yedeği ve secret\'sız webhook AÇIK — canlı dağıtımda NODE_ENV=production verin'
+      );
+    }
 
     app.listen(PORT, () => {
       logger.info({ port: PORT, brands: BRANDS.map((b) => b.id) }, 'API çalışıyor');

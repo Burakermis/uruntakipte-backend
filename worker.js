@@ -1,5 +1,5 @@
 const trackedTargetStore = require('./store/trackedTargetStore');
-const { isTargetDue } = require('./checkSchedule');
+const { filterDueTargets } = require('./checkSchedule');
 const { checkQueue } = require('./queue/scrapeQueue');
 const { WORKER_TICK_MS } = require('./constants');
 const logger = require('./logger');
@@ -25,6 +25,7 @@ const logger = require('./logger');
 // halde faz kadar geciken hedef bir sonraki tik'te "henüz erken" sayılıp bir
 // tur atlar — düzelttiğimiz 2 dakika sorununun aynısı geri gelirdi.
 const JITTER_WINDOW_MS = Math.floor(WORKER_TICK_MS / 3);
+const ENQUEUE_BATCH = 500;
 
 function checkDelayFor(targetId) {
   // Knuth çarpımsal hash — ardışık id'leri pencereye düzgün dağıtır
@@ -35,22 +36,30 @@ function checkDelayFor(targetId) {
 async function runCheckCycle() {
   // trackedTargetStore.listActive() sadece en az bir aktif abonesi olan
   // hedefleri döner — aynı ürünü izleyen N kullanıcı olsa da liste TEK satır
-  // içerir, yani sayfa TEK kez çekilir (bkz. checker.js). isTargetDue ile
+  // içerir, yani sayfa TEK kez çekilir (bkz. checker.js). filterDueTargets ile
   // ayrıca her hedefin kendi tier-bazlı aralığına göre "sırası geldi mi"
   // filtreleniyor (bkz. checkSchedule.js) — free bir hedef premium'un 1dk'lık
   // tik'inde her seferinde taranmaz, sadece 5dk'da bir sırası gelir.
+  //
+  // Karar TOPLU: hedef başına sorgu yok (eskiden 8.000 hedefte 24.000 sorgu,
+  // tik boyunca DB havuzu dolu kaldığı için API istekleri saniyelerce
+  // bekliyordu — bkz. perf/bench-tick.js, perf/bench-api.js).
   const allActive = await trackedTargetStore.listActive();
-  const dueFlags = await Promise.all(allActive.map((t) => isTargetDue(t)));
-  const targets = allActive.filter((_, i) => dueFlags[i]);
+  const targets = await filterDueTargets(allActive);
 
-  for (const target of targets) {
-    // jobId ile aynı hedefin aynı tikte yanlışlıkla iki kez kuyruğa
-    // girmesi engelleniyor (BullMQ aynı id'li aktif/bekleyen job'u yok
-    // sayar) — tik süresi işlem süresinden kısa olursa diye bir güvenlik ağı.
-    await checkQueue.add(
-      'check-target',
-      { targetId: target.id },
-      { jobId: `check-${target.id}-${Math.floor(Date.now() / WORKER_TICK_MS)}`, delay: checkDelayFor(target.id) }
+  // jobId ile aynı hedefin aynı tikte yanlışlıkla iki kez kuyruğa
+  // girmesi engelleniyor (BullMQ aynı id'li aktif/bekleyen job'u yok
+  // sayar) — tik süresi işlem süresinden kısa olursa diye bir güvenlik ağı.
+  // Kuyruğa toplu ekleniyor: hedef başına ayrı Redis gidiş-dönüşü yerine
+  // 500'lük gruplar.
+  const bucket = Math.floor(Date.now() / WORKER_TICK_MS);
+  for (let i = 0; i < targets.length; i += ENQUEUE_BATCH) {
+    await checkQueue.addBulk(
+      targets.slice(i, i + ENQUEUE_BATCH).map((target) => ({
+        name: 'check-target',
+        data: { targetId: target.id },
+        opts: { jobId: `check-${target.id}-${bucket}`, delay: checkDelayFor(target.id) },
+      }))
     );
   }
 

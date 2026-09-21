@@ -14,11 +14,26 @@ const { asyncHandler } = require('../middleware/asyncHandler');
 
 const router = express.Router();
 
+// İstemcinin KENDİ çektiği HTML'i gönderebilmesi (sunucunun engellendiği
+// markalar için düşünülmüş, geliştirme/test akışı) VARSAYILAN OLARAK KAPALI:
+// bu HTML'e güvenmek, herkesin paylaştığı bir hedefi (trackedTarget) ve
+// Redis önbelleğini istemcinin yazdığı içerikle doldurmak demek. Canlı testte
+// bir saldırgan gerçek bir ürün URL'i için sahte ad/fiyat/görsel içeren HTML
+// gönderdi; o ürünü HTML'siz takibe alan başka bir kullanıcı sahte veriyi aldı
+// (ad push bildirimi başlığına da giriyor). Mobil uygulama zaten hiç html
+// göndermiyor ve sunucu artık 8 markanın hepsini kendisi çekebiliyor. Açmak
+// için: ALLOW_CLIENT_HTML=1 (yalnızca yerel geliştirme). İstek zamanında
+// okunuyor ki testler açıp kapatabilsin.
+function clientHtmlAllowed() {
+  return process.env.ALLOW_CLIENT_HTML === '1';
+}
+
 // POST /api/products/resolve
 // Mobil uygulamanın "Ürün Ekle" ekranını doldurmak için çağırdığı endpoint.
 // Henüz hiçbir şey kaydetmez — sadece URL'i çözüp renk/beden/fiyat/stok döner.
 router.post('/resolve', asyncHandler(async (req, res) => {
-  const { url, html } = req.body || {};
+  const { url } = req.body || {};
+  const html = clientHtmlAllowed() ? (req.body || {}).html : undefined;
 
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ error: 'INVALID_REQUEST', message: 'url alanı zorunlu.' });
@@ -111,8 +126,9 @@ async function findOrCreateTarget({ url, brand, htmlOverride }) {
 // istemcinin beklediği düz TrackedProduct biçimine dönüştürür (API sözleşmesi
 // eski tekli-tablo şemasıyla aynı kalsın diye — mobil tarafta değişiklik
 // gerekmiyor).
-async function toApiShape(subscription, target, variant) {
-  const previous = await priceHistoryStore.previousPrice(target.id, subscription.sku, variant.price);
+// previous: bir önceki (farklı) fiyat ya da null — çağıran hesaplayıp verir ki
+// liste ucu bunu abonelik başına ayrı sorgu yerine TOPLU çekebilsin.
+function toApiShape(subscription, target, variant, previous) {
   const priceChangePercent =
     previous != null && variant.price != null && previous !== 0
       ? Math.round(((variant.price - previous) / previous) * 100)
@@ -147,7 +163,8 @@ async function toApiShape(subscription, target, variant) {
 // tekrar eklerse (daha önce silmişse) tercihleri güncellenip yeniden aktive
 // edilir, mükerrer kayıt oluşmaz.
 router.post('/', asyncHandler(async (req, res) => {
-  const { userId, url, sku, html } = req.body || {};
+  const { userId, url, sku } = req.body || {};
+  const html = clientHtmlAllowed() ? (req.body || {}).html : undefined;
 
   const required = { userId, url, sku };
   const missing = Object.entries(required)
@@ -251,7 +268,8 @@ router.post('/', asyncHandler(async (req, res) => {
   // yeniden abone olunca worker'ın tekrar taraması için aktive edilir.
   await trackedTargetStore.update(target.id, { active: true });
 
-  const shaped = await toApiShape(subscription, target, variant);
+  const previous = await priceHistoryStore.previousPrice(target.id, subscription.sku, variant.price);
+  const shaped = toApiShape(subscription, target, variant, previous);
   return res.status(201).json({ ...shaped, alreadyTracked });
 }));
 
@@ -264,17 +282,27 @@ router.get('/', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'INVALID_REQUEST', message: 'userId query param zorunlu.' });
   }
 
+  // TOPLU: hedefler ve önceki fiyatlar abonelik başına ayrı sorgu yerine
+  // toplam 3 sorguyla geliyor. Eskiden abonelik başına 2 sorgu vardı — 50 ürün
+  // izleyen bir kullanıcının listesi 10 eşzamanlıda ~1sn, 200 ürünlüde ~3,7sn
+  // sürüyordu ve DB havuzunu doldurup diğer kullanıcıları da bekletiyordu
+  // (bkz. perf/bench-api.js).
   const subscriptions = await subscriptionStore.listByUser(userId);
-  const items = await Promise.all(
-    subscriptions.map(async (sub) => {
-      const target = await trackedTargetStore.findById(sub.targetId);
-      const variant = target?.variants.find((v) => v.sku === sub.sku);
-      if (!target || !variant) return null;
-      return toApiShape(sub, target, variant);
-    })
+  const targets = await trackedTargetStore.findByIds([...new Set(subscriptions.map((s) => s.targetId))]);
+
+  const resolved = [];
+  for (const sub of subscriptions) {
+    const target = targets.get(sub.targetId);
+    const variant = target?.variants.find((v) => v.sku === sub.sku);
+    if (target && variant) resolved.push({ sub, target, variant });
+  }
+  const previous = await priceHistoryStore.previousPrices(
+    resolved.map(({ sub, target, variant }) => ({ targetId: target.id, sku: sub.sku, currentPrice: variant.price }))
   );
 
-  return res.json(items.filter(Boolean));
+  return res.json(
+    resolved.map(({ sub, target, variant }) => toApiShape(sub, target, variant, previous.get(`${target.id}|${sub.sku}`) ?? null))
+  );
 }));
 
 // DELETE /api/products/:id?userId=... — takipten çıkar (sadece bu kullanıcının

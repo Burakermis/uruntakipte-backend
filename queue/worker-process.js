@@ -4,6 +4,7 @@
 // tek bir yerde sınırlanır.
 const { Worker } = require('bullmq');
 const { connection } = require('./scrapeQueue');
+const { createDomainLimiter } = require('./domainLimiter');
 const { fetchHtml } = require('../scraper/fetchHtml');
 const { resolveProductFromHtml } = require('../scraper/registry');
 const { normalizeTrackingUrl } = require('../scraper/normalizeUrl');
@@ -13,38 +14,23 @@ const { checkTrackedTarget } = require('../checker');
 const { isTargetDue } = require('../checkSchedule');
 const { prewarmBrowser } = require('../scraper/browserFetch');
 const htmlCache = require('../store/htmlCache');
-const db = require('../store/db');
 const logger = require('../logger');
 
-const SCRAPE_CONCURRENCY = 5;
-const CHECK_CONCURRENCY = 5;
-// Aynı domaine art arda çok hızlı istek atmamak için (Akamai gibi bot
-// korumaları bunu şüpheli buluyor) — eskiden worker.js'in sıralı
-// for-loop'unda doğal olarak sağlanıyordu, concurrency>1 ile artık burada
-// açıkça uygulanması gerekiyor.
+// Varsayılan 5. ÖLÇÜM (perf/bench-worker.js, gerçekçi marka karışımı, alan-adı
+// aralığı ZORLANIRKEN): 5 slotla tek worker ~105 kontrol/dk, 10 slotla ~130.
+// 10 slotta tavanı slot değil ALAN ADI belirliyor: tek IP'den marka başına
+// 1,5sn aralık = en fazla 40 kontrol/dk/marka, yani en kalabalık marka (Zara,
+// %30 pay) toplamı ~133/dk'ya kilitliyor. Bir marka 40'tan fazla premium hedef
+// taşırsa o markanın 1dk'lık aralığı tutulamaz. Slotu artırmak bunu çözmez;
+// çıkış IP'sini çeşitlendirmek (aralığı marka+proxy başına tutmak) gerekir.
+// browserFetch'in BROWSER_CONCURRENCY sınırı slotla birlikte artırılmalı.
+const SCRAPE_CONCURRENCY = Number(process.env.SCRAPE_CONCURRENCY || 5);
+const CHECK_CONCURRENCY = Number(process.env.CHECK_CONCURRENCY || 5);
+// Aynı domaine art arda çok hızlı istek atmamak için (bkz. domainLimiter.js).
+// Süreç BAŞINA: birden çok worker süreci aynı markaya toplamda daha sık istek atar.
 const DOMAIN_DELAY_MS = 1500;
-const lastRequestAtByHost = new Map();
-
-function hostnameOf(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return null;
-  }
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForDomainSlot(url) {
-  const host = hostnameOf(url);
-  if (!host) return;
-  const lastAt = lastRequestAtByHost.get(host) ?? 0;
-  const wait = lastAt + DOMAIN_DELAY_MS - Date.now();
-  if (wait > 0) await sleep(wait);
-  lastRequestAtByHost.set(host, Date.now());
-}
+const domainLimiter = createDomainLimiter(DOMAIN_DELAY_MS);
+const waitForDomainSlot = (url) => domainLimiter.waitForSlot(url);
 
 // İlk kez görülen bir URL'i çözüp trackedTarget oluşturur — routes/products.js'in
 // eski findOrCreateTarget'ının "cache miss" dalının taşınmış hali (bkz.
@@ -107,14 +93,9 @@ async function finishScrapeJob({ url, brandId, urlKey, html }) {
     await trackedTargetStore.addAliasKey(target.id, canonicalKey);
   }
 
-  for (const variant of resolved.variants) {
-    await priceHistoryStore.record({
-      targetId: target.id,
-      sku: variant.sku,
-      price: variant.price,
-      availability: variant.availability,
-    });
-  }
+  // İlk kayıt: tüm varyantlar için başlangıç satırı (sonraki kontroller
+  // yalnızca değişimi yazar, bkz. checker.js).
+  await priceHistoryStore.recordMany(target.id, resolved.variants);
 
   return { targetId: target.id };
 }
@@ -134,6 +115,16 @@ async function processCheckJob(job) {
   if (!(await isTargetDue(target))) {
     logger.debug({ targetId }, '[worker-process] bayat kontrol işi atlandı (sırası gelmemiş)');
     return { ok: false, reason: 'NOT_DUE' };
+  }
+
+  // Yukarıdaki kontrol "okuma"; tarama ise saniyeler sonra ve last_attempt_at
+  // ancak tarama BİTİNCE yazılıyor. concurrency>1 iken aynı hedefin birikmiş
+  // 2-3 işi aynı anda "sırası geldi" görüp hepsi tarıyordu (canlı testte 3 sn
+  // içinde aynı ürün 3 kez). Taramaya başlamadan hedefi atomik olarak
+  // sahipleniyoruz: yalnızca ilk iş kazanır.
+  if (!(await trackedTargetStore.claimAttempt(target))) {
+    logger.debug({ targetId }, '[worker-process] kontrol işi atlandı (hedefi başka bir iş sahiplendi)');
+    return { ok: false, reason: 'ALREADY_CLAIMED' };
   }
 
   // Kaç saniye bekleyerek domain sırasına girdiğimiz ile asıl taramanın ne
@@ -159,27 +150,12 @@ async function processCheckJob(job) {
   return result;
 }
 
-// 90 günden eski, fiyat/durumu son kayıttan farklı OLMAYAN (yani "sıkıcı",
-// tekrar bilgi taşımayan) ardışık priceHistory kayıtlarını buda — asıl
-// değişiklik noktaları (previousPrice'ın dayandığı kayıtlar) korunur.
+// 90 günden eski, fiyat/durumu son kayıttan farklı OLMAYAN ardışık priceHistory
+// kayıtlarını buda (bkz. priceHistoryStore.pruneUnchanged).
 async function processRetentionJob() {
-  const { rows } = await db.query(
-    `WITH ranked AS (
-       SELECT id, target_id, sku, price,
-              LAG(price) OVER (PARTITION BY target_id, sku ORDER BY checked_at) AS prev_price,
-              checked_at
-       FROM price_history
-     )
-     DELETE FROM price_history
-     WHERE id IN (
-       SELECT id FROM ranked
-       WHERE checked_at < now() - INTERVAL '90 days'
-         AND prev_price IS NOT DISTINCT FROM price
-     )
-     RETURNING id`
-  );
-  logger.info({ deleted: rows.length }, '[worker-process] retention tamamlandı');
-  return { deleted: rows.length };
+  const deleted = await priceHistoryStore.pruneUnchanged(90);
+  logger.info({ deleted }, '[worker-process] retention tamamlandı');
+  return { deleted };
 }
 
 const scrapeWorker = new Worker('scrape', processScrapeJob, { connection, concurrency: SCRAPE_CONCURRENCY });

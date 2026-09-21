@@ -59,16 +59,21 @@ async function checkTrackedTarget(target) {
     consecutiveFailures: 0,
   });
 
-  // Fiyat geçmişi HEDEF bazında tek sefer yazılır (kullanıcı sayısından
-  // bağımsız) — ürünün sayfadaki TÜM varyantları için.
-  for (const variant of resolved.variants) {
-    await priceHistoryStore.record({
-      targetId: target.id,
-      sku: variant.sku,
-      price: variant.price,
-      availability: variant.availability,
-    });
-  }
+  // Fiyat geçmişi HEDEF bazında (kullanıcı sayısından bağımsız) ve SADECE
+  // DEĞİŞİKLİKTE yazılır: bir önceki başarılı kontrolde saklanan varyantla
+  // (target.variants, yukarıdaki update'ten ÖNCEKİ hâli) fiyat ya da stok
+  // durumu farklıysa, ya da varyant yeniyse. Eskiden her kontrol her
+  // varyant için satır yazıyordu: 12 varyantlı premium bir hedef günde
+  // ~17.000 satır, 100 premium hedef 90 günde ~18 GB, 1000 hedef ~175 GB
+  // (bkz. perf/bench-history.js). "Sıkıcı" satırlar zaten 90 gün sonra
+  // budanıyordu (bkz. priceHistoryStore.pruneUnchanged) — yazmadan atmak aynı
+  // bilgiyi korur. Son kontrol zamanı history'den değil target.last_checked_at'ten.
+  const previousBySku = new Map((target.variants || []).map((v) => [v.sku, v]));
+  const changed = resolved.variants.filter((variant) => {
+    const before = previousBySku.get(variant.sku);
+    return !before || before.price !== variant.price || before.availability !== variant.availability;
+  });
+  await priceHistoryStore.recordMany(target.id, changed);
 
   const events = [];
   const subscriptions = await subscriptionStore.listByTarget(target.id);

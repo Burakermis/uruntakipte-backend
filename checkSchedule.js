@@ -1,5 +1,4 @@
 const subscriptionStore = require('./store/subscriptionStore');
-const userStore = require('./store/userStore');
 const { limitsForTier, CIRCUIT_BREAKER, WORKER_TICK_MS } = require('./constants');
 
 // Worker sabit periyotlu tik'ler hâlinde çalışıyor (bkz. worker.js), ama
@@ -18,14 +17,14 @@ const DUE_TOLERANCE_MS = WORKER_TICK_MS / 2;
 // TIER_LIMITS). Bir hedefi hem free hem premium kullanıcı izliyorsa free
 // kullanıcı da premium'un hızlı aralığından bedavaya faydalanır — paylaşılan
 // trackedTarget mimarisinin doğal bir sonucu.
+// anyPremium: true/false, ya da undefined (aktif abonesi yok -> sonsuz).
+function baseIntervalFor(anyPremium) {
+  return anyPremium === undefined ? Infinity : limitsForTier(anyPremium).checkIntervalMs;
+}
+
 async function requiredIntervalMsForTarget(targetId) {
-  const subs = await subscriptionStore.listByTarget(targetId);
-  let min = Infinity;
-  for (const sub of subs) {
-    const { checkIntervalMs } = limitsForTier(await userStore.isPremium(sub.userId));
-    if (checkIntervalMs < min) min = checkIntervalMs;
-  }
-  return min;
+  const tiers = await subscriptionStore.premiumByTarget([targetId]);
+  return baseIntervalFor(tiers.get(Number(targetId)));
 }
 
 // Art arda başarısız olan bir hedef için gereken aralığı üstel olarak
@@ -40,10 +39,10 @@ function applyCircuitBreaker(baseIntervalMs, consecutiveFailures) {
   return Math.min(backoffMs, CIRCUIT_BREAKER.backoffMaxMs);
 }
 
-// Hiç kontrol edilmemişse ya da gereken aralık geçmişse "sırası geldi"
-// demektir. worker.js her tik'te bunu kullanarak listActive()'i filtreler;
-// check-now endpoint'i (manuel yenileme) bilerek bunu ATLAR.
-async function isTargetDue(target, now = Date.now()) {
+// Saf karar (I/O yok): abone katmanından gelen taban aralığa göre hedefin
+// sırası geldi mi. isTargetDue (tek hedef) ve filterDueTargets (toplu) AYNI
+// kuralı kullanır — ikisi ayrışırsa tik ile worker farklı karar verir.
+function isDueGiven(target, baseIntervalMs, now) {
   // Ölçüt son BAŞARILI kontrol değil, son DENEME. Fark kritik: checker.js
   // başarısız bir kontrolde last_checked_at'i (haklı olarak) güncellemiyor —
   // eğer geri çekilmeyi ona göre hesaplarsak, hiç başarılı olamayan bir hedef
@@ -54,9 +53,24 @@ async function isTargetDue(target, now = Date.now()) {
   // günde ~1440 istek demek, IP engellenmesinin en kestirme yolu.
   const lastAttempt = target.lastAttemptAt || target.lastCheckedAt;
   if (!lastAttempt) return true;
-  const baseIntervalMs = await requiredIntervalMsForTarget(target.id);
   const requiredMs = applyCircuitBreaker(baseIntervalMs, target.consecutiveFailures);
   return now - new Date(lastAttempt).getTime() >= requiredMs - DUE_TOLERANCE_MS;
 }
 
-module.exports = { requiredIntervalMsForTarget, isTargetDue };
+// Hiç kontrol edilmemişse ya da gereken aralık geçmişse "sırası geldi"
+// demektir. worker-process her check işinin başında bunu bir kez daha
+// doğruluyor; check-now endpoint'i (manuel yenileme) bilerek bunu ATLAR.
+async function isTargetDue(target, now = Date.now()) {
+  // Hiç denenmemiş hedef için abone sorgusuna gerek yok.
+  if (!(target.lastAttemptAt || target.lastCheckedAt)) return true;
+  return isDueGiven(target, await requiredIntervalMsForTarget(target.id), now);
+}
+
+// Tik döngüsü için TOPLU karar: hedef sayısından bağımsız TEK abone/premium
+// sorgusu (eskiden hedef başına 1 + abone sayısı sorgu, hepsi de yazmalı).
+async function filterDueTargets(targets, now = Date.now()) {
+  const tiers = await subscriptionStore.premiumByTarget();
+  return targets.filter((t) => isDueGiven(t, baseIntervalFor(tiers.get(t.id)), now));
+}
+
+module.exports = { requiredIntervalMsForTarget, isTargetDue, filterDueTargets, isDueGiven, baseIntervalFor };

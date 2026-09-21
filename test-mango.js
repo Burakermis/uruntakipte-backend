@@ -36,6 +36,18 @@ check(
   ]
 );
 
+console.log('\n--- eski biçimli URL (sitede yeni biçime yönlenen, istek URL\'inde kod yok) ---');
+const NEW_URL = 'https://shop.mango.com/tr/tr/p/erkek/ceket/ceket/fitilli-kadife-yakalı-denim-ceket/37084403/30/00';
+const legacy = parseMangoProduct(
+  html,
+  'https://shop.mango.com/tr/tr/p/erkek/ceket/fitilli-kadife-yakali-denim-ceket_37084403'
+);
+check('productId URL değil, canonical\'dan', legacy.productId, '37084403');
+check('SKU yeni biçimle aynı', legacy.variants[0].sku, '37084403-30-S');
+check('kalıcı URL yeni biçim (dedup + yönlendirmesiz tarama)', legacy.canonicalUrl, NEW_URL);
+check('yeni biçimli URL\'de davranış değişmedi', product.canonicalUrl, NEW_URL);
+check('yeni biçimli URL\'de SKU', product.variants[0].sku, '37084403-30-S');
+
 console.log('\n--- indirimli ürün + tükenmiş beden (gerçek örnek) ---');
 const discountHtml = fs.readFileSync(
   path.join(__dirname, 'fixtures/mango-polo-kazak-discount.html'),
