@@ -68,11 +68,19 @@ CREATE INDEX IF NOT EXISTS idx_price_history_checked_at ON price_history (checke
 CREATE TABLE IF NOT EXISTS device_tokens (
   id SERIAL PRIMARY KEY,
   user_id TEXT NOT NULL,
-  expo_push_token TEXT NOT NULL UNIQUE,
+  expo_push_token TEXT NOT NULL,
   platform TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ
 );
+-- Eskiden expo_push_token TEK BAŞINA UNIQUE idi ve çakışmada user_id
+-- üzerine yazılıyordu: bir token'ı bilen herkes onu kendi kimliğine
+-- "taşıyıp" gerçek sahibinin bildirimlerini kesebiliyordu. Artık tekillik
+-- (kullanıcı, token) çiftinde: bir kullanıcının kaydı başkasınınkini
+-- değiştiremez (bkz. store/deviceTokenStore.js). Eski tabloda bu kısıt
+-- otomatik adıyla bulunur; CREATE TABLE IF NOT EXISTS onu düşürmez.
+ALTER TABLE device_tokens DROP CONSTRAINT IF EXISTS device_tokens_expo_push_token_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_device_tokens_user_token ON device_tokens (user_id, expo_push_token);
 CREATE INDEX IF NOT EXISTS idx_device_tokens_user_id ON device_tokens (user_id);
 
 CREATE TABLE IF NOT EXISTS users (

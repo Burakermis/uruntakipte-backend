@@ -12,12 +12,19 @@ function mapRow(row) {
   };
 }
 
+// Kayıt (kullanıcı, token) çiftine özel: aynı token başka bir userId ile gelirse
+// mevcut kaydın sahibi DEĞİŞMEZ, ikinci bir kayıt eklenir. Eskiden çakışmada
+// user_id üzerine yazılıyordu — token'ı bilen biri onu kendi kimliğine taşıyıp
+// gerçek sahibinin bildirimlerini kesebiliyordu. Bedeli: uygulama yeniden
+// kurulup userId değişince eski kimlik de aynı cihaza bildirim göndermeye
+// devam eder (aynı kişi, zararsız); bunu kimliksiz bir API'de sahiplik
+// kanıtı olmadan ayırt etmenin yolu yok.
 async function upsert({ userId, expoPushToken, platform }) {
   const { rows } = await db.query(
     `INSERT INTO device_tokens (user_id, expo_push_token, platform, updated_at)
      VALUES ($1, $2, $3, now())
-     ON CONFLICT (expo_push_token) DO UPDATE
-       SET user_id = EXCLUDED.user_id, platform = EXCLUDED.platform, updated_at = now()
+     ON CONFLICT (user_id, expo_push_token) DO UPDATE
+       SET platform = EXCLUDED.platform, updated_at = now()
      RETURNING *`,
     [userId, expoPushToken, platform ?? null]
   );

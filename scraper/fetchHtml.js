@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { fetchHtmlWithBrowser } = require('./browserFetch');
 const { brandFetchProfile } = require('./registry');
+const { isDevMode } = require('../config');
 
 // DEV-ONLY: bazı siteler (Akamai vb.) hem plain fetch hem de headless
 // tarayıcıyı engelleyebilir. Geliştirme/test sırasında akışın uçtan uca
@@ -15,7 +16,7 @@ const DEV_FIXTURES = {
     path.join(__dirname, '..', 'fixtures', 'hm-product-snippet.html'),
 };
 
-const ALLOW_FIXTURE_FALLBACK = process.env.NODE_ENV !== 'production';
+const ALLOW_FIXTURE_FALLBACK = isDevMode();
 
 const BROWSER_HEADERS = {
   'User-Agent':
