@@ -13,6 +13,7 @@ const { WORKER_TICK_MS } = require('./constants');
 const db = require('./store/db');
 const { retentionQueue } = require('./queue/scrapeQueue');
 const { productsLimiter, generalLimiter } = require('./middleware/rateLimit');
+const { isDevMode } = require('./config');
 
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // günde bir kez yeter
 
@@ -71,14 +72,20 @@ if (require.main === module) {
     // güvenli, ayrı bir migration adımı gerektirmiyor (bkz. store/db.js).
     await db.migrate();
 
-    // NODE_ENV=production DEĞİLSE aşağıdakiler AÇIK kalır: kimliksiz premium
-    // verebilen /users/:id/premium ucu, engelli sayfalar için eski fixture
-    // yedeği ve (secret tanımlı değilse) kimliksiz RevenueCat webhook'u. Bir
-    // dağıtımda NODE_ENV unutulursa bunlar sessizce açık kalıyordu.
-    if (process.env.NODE_ENV !== 'production') {
+    // Geliştirme kolaylıkları (kimliksiz /users/:id/premium ucu, fixture yedeği,
+    // secret'sız webhook) yalnızca NODE_ENV=development|test iken açık (bkz.
+    // config.js). Canlıda NODE_ENV=production verin; tanımsız/yanlış yazılmış
+    // değer bunları KAPALI bırakır ama yine de uyarıyoruz — çünkü aynı zamanda
+    // canlı ortamın yanlış yapılandırıldığının işareti.
+    if (isDevMode()) {
+      logger.warn(
+        { nodeEnv: process.env.NODE_ENV },
+        '[server] geliştirme modu: dev-premium ucu, fixture yedeği ve secret\'sız webhook AÇIK — canlı dağıtımda NODE_ENV=production verin'
+      );
+    } else if (process.env.NODE_ENV !== 'production') {
       logger.warn(
         { nodeEnv: process.env.NODE_ENV || '(tanımsız)' },
-        '[server] NODE_ENV=production değil: dev-premium ucu, fixture yedeği ve secret\'sız webhook AÇIK — canlı dağıtımda NODE_ENV=production verin'
+        '[server] NODE_ENV tanınmıyor: dev uçları KAPALI tutuluyor; canlıda NODE_ENV=production, yerelde development verin'
       );
     }
 

@@ -2,6 +2,9 @@ const crypto = require('crypto');
 const express = require('express');
 const userStore = require('../store/userStore');
 const logger = require('../logger');
+const { isDevMode } = require('../config');
+const { maskId } = require('../middleware/requestLog');
+const { shouldIgnoreEvent } = require('../billing/revenuecat');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
 const router = express.Router();
@@ -24,10 +27,11 @@ const PREMIUM_DEACTIVATING_EVENTS = new Set(['EXPIRATION']);
 function isAuthorized(req) {
   const expected = process.env.REVENUECAT_WEBHOOK_SECRET;
   // Secret tanımlanmadıysa (henüz RevenueCat hesabı kurulmadıysa) yalnızca
-  // geliştirmede engellemiyoruz. Prod'da ise KAPALI (fail-closed): eskiden secret
-  // unutulunca bu uç kimliksiz açık kalıyordu — canlı testte herhangi biri
-  // INITIAL_PURCHASE göndererek istediği kimliği premium yapabildi.
-  if (!expected) return process.env.NODE_ENV !== 'production';
+  // AÇIKÇA geliştirme modunda (NODE_ENV=development|test) engellemiyoruz; diğer
+  // her durumda (production, tanımsız, yazım hatası) KAPALI (fail-closed):
+  // eskiden secret unutulunca bu uç kimliksiz açık kalıyordu — canlı testte
+  // herhangi biri INITIAL_PURCHASE göndererek istediği kimliği premium yapabildi.
+  if (!expected) return isDevMode();
   // Sabit zamanlı karşılaştırma: `===` ilk farklı karakterde döndüğü için
   // secret'ı karakter karakter zamanlama farkından tahmin etmeye açıktı.
   const provided = Buffer.from(String(req.headers.authorization || ''));
@@ -47,6 +51,13 @@ router.post('/revenuecat', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'INVALID_REQUEST', message: 'event.app_user_id ve event.type zorunlu.' });
   }
 
+  // Sandbox (TestFlight/iç test) olayları canlıda premium durumunu ne açar ne
+  // kapatır (bkz. billing/revenuecat.js). 200 dönüyoruz ki RevenueCat yeniden denemesin.
+  if (shouldIgnoreEvent(event)) {
+    logger.info({ userId: maskId(userId), eventType: event.type }, '[webhooks] sandbox olayı canlıda yok sayıldı');
+    return res.status(200).json({ ok: true, ignored: 'SANDBOX' });
+  }
+
   if (PREMIUM_ACTIVATING_EVENTS.has(event.type)) {
     await userStore.setPremium(userId, true);
   } else if (PREMIUM_DEACTIVATING_EVENTS.has(event.type)) {
@@ -54,7 +65,7 @@ router.post('/revenuecat', asyncHandler(async (req, res) => {
   } else {
     // CANCELLATION gibi diğer event'ler bilerek yoksayılıyor — kullanıcı
     // dönem sonuna kadar erişimini KORUR, gerçek kapanış EXPIRATION'da gelir.
-    logger.info({ userId, eventType: event.type }, '[webhooks] premium durumunu etkilemeyen event, atlandı');
+    logger.info({ userId: maskId(userId), eventType: event.type }, '[webhooks] premium durumunu etkilemeyen event, atlandı');
   }
 
   return res.status(200).json({ ok: true });

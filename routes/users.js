@@ -3,6 +3,9 @@ const userStore = require('../store/userStore');
 const subscriptionStore = require('../store/subscriptionStore');
 const { limitsForTier } = require('../constants');
 const logger = require('../logger');
+const { isDevMode } = require('../config');
+const { maskId } = require('../middleware/requestLog');
+const { hasActiveEntitlement } = require('../billing/revenuecat');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
 const router = express.Router();
@@ -39,7 +42,7 @@ router.get('/:userId/limits', asyncHandler(async (req, res) => {
 // POST /api/users/:userId/premium
 // DEV/DEMO amaçlı: gerçek bir App Store/Play Store IAP entegrasyonu yerine
 // geçiyor (o, ayrı bir geliştirici hesabı + billing altyapısı gerektiriyor,
-// şu anki kapsamın dışında). NODE_ENV=production'da kapalı — açık kalsaydı
+// şu anki kapsamın dışında). Yalnızca NODE_ENV=development|test iken açık (fail-closed) — açık kalsaydı
 // herhangi biri kendini bedavaya premium yapabilirdi (bkz.
 // scraper/fetchHtml.js'deki ALLOW_FIXTURE_FALLBACK ile aynı gating deseni).
 // Gerçek/native satın alma sonrası mobil taraf artık bunun yerine aşağıdaki
@@ -48,7 +51,7 @@ router.get('/:userId/limits', asyncHandler(async (req, res) => {
 // webhook'u ve bu sync uç noktasıdır, ikisi de istemcinin kendi beyanına
 // değil RevenueCat'in doğruladığı veriye dayanır.
 router.post('/:userId/premium', asyncHandler(async (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
+  if (!isDevMode()) {
     return res.status(403).json({
       error: 'DEV_ONLY_ENDPOINT',
       message: 'Bu uç nokta sadece geliştirme ortamında kullanılabilir.',
@@ -90,25 +93,21 @@ router.post('/:userId/sync-premium', asyncHandler(async (req, res) => {
       headers: { Authorization: `Bearer ${secretKey}` },
     });
     if (!rcRes.ok) {
-      logger.error({ userId, status: rcRes.status }, '[users] RevenueCat subscriber sorgusu başarısız');
+      logger.error({ userId: maskId(userId), status: rcRes.status }, '[users] RevenueCat subscriber sorgusu başarısız');
       return res.status(502).json({ error: 'REVENUECAT_ERROR', message: 'RevenueCat sorgulanamadı.' });
     }
     ({ subscriber } = await rcRes.json());
   } catch (err) {
-    logger.error({ userId, err: err.message }, '[users] RevenueCat isteği atılamadı');
+    logger.error({ userId: maskId(userId), err: err.message }, '[users] RevenueCat isteği atılamadı');
     return res.status(502).json({ error: 'REVENUECAT_ERROR', message: 'RevenueCat sorgulanamadı.' });
   }
 
   // RevenueCat'in REST API'si "entitlements" altında kullanıcının GELMİŞ
   // GEÇMİŞ tüm entitlement'larını döner (SDK'daki customerInfo.entitlements
   // .active gibi önceden filtrelenmiş değil) — aktif mi diye expires_date'i
-  // kendimiz kontrol ediyoruz; null/undefined expires_date süresiz (ör.
-  // lifetime) demek.
-  const now = Date.now();
-  const entitlements = subscriber?.entitlements || {};
-  const isPremium = Object.values(entitlements).some(
-    (e) => !e.expires_date || new Date(e.expires_date).getTime() > now
-  );
+  // kendimiz kontrol ediyoruz; sandbox satın almalar geliştirme modu dışında
+  // sayılmaz (bkz. billing/revenuecat.js).
+  const isPremium = hasActiveEntitlement(subscriber);
 
   const record = await userStore.setPremium(userId, isPremium);
   return res.json({ userId: record.userId, isPremium: record.isPremium });
