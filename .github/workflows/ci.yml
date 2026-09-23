@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Aynı dal için yeni bir push gelince eski koşuyu iptal et.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # test:unit gerçek Postgres ve Redis ister (bkz. docker-compose.yml).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: trackprice
+          POSTGRES_PASSWORD: trackprice
+          POSTGRES_DB: trackprice_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trackprice -d trackprice_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Adı "test" içermeli: testler tabloları TRUNCATE eder ve başka adlı bir
+      # veritabanında çalışmayı reddeder (bkz. perf/lib.js assertScratchDb).
+      DATABASE_URL: postgres://trackprice:trackprice@localhost:5432/trackprice_test
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      NODE_ENV: test
+      LOG_LEVEL: warn
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 21
+          cache: npm
+
+      # Tarayıcı indirmesi gerekmez: birim testler sayfayı fixture'lardan
+      # okur, Chromium açmaz.
+      - run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+      - run: npm run test:unit
