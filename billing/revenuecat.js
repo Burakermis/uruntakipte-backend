@@ -42,4 +42,25 @@ function hasActiveEntitlement(subscriber, now = Date.now()) {
   );
 }
 
-module.exports = { isSandboxEvent, shouldIgnoreEvent, isSandboxEntitlement, hasActiveEntitlement };
+// Hesap silinirken RevenueCat'teki müşteri kaydını da siler (KVKK/GDPR: veri sağlayıcıda kalmasın).
+// En iyi çaba: anahtar yoksa ya da çağrı başarısız olursa hesap silme ENGELLENMEZ (yerel veri zaten
+// silindi); sonuç döner ve çağıran loglar. Mağazadaki abonelik bundan etkilenmez — kullanıcı onu
+// Apple/Google'dan ayrıca iptal eder.
+async function deleteSubscriber(userId) {
+  const secretKey = process.env.REVENUECAT_SECRET_KEY;
+  if (!secretKey) return { ok: false, reason: 'NOT_CONFIGURED' };
+  try {
+    const res = await fetch(`https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${secretKey}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    // 404: RevenueCat bu kullanıcıyı hiç görmemiş (satın alma yok) — silinecek bir şey yok, başarı sayılır.
+    if (res.ok || res.status === 404) return { ok: true };
+    return { ok: false, reason: `HTTP_${res.status}` };
+  } catch (err) {
+    return { ok: false, reason: err.name === 'TimeoutError' ? 'TIMEOUT' : 'NETWORK' };
+  }
+}
+
+module.exports = { isSandboxEvent, shouldIgnoreEvent, isSandboxEntitlement, hasActiveEntitlement, deleteSubscriber };

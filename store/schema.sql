@@ -89,3 +89,11 @@ CREATE TABLE IF NOT EXISTS users (
   is_premium BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Silinen hesapların kimlikleri (rastgele UUID; kişisel veri DEĞİL). İmzalı oturum anahtarları tek tek
+-- iptal edilemediği için, silinen bir hesabın anahtarı geçerli kalıp hesabı geri doğurmasın diye bu
+-- kimlikler reddedilir (bkz. middleware/auth.js, routes/webhooks.js).
+CREATE TABLE IF NOT EXISTS deleted_users (
+  user_id TEXT PRIMARY KEY,
+  deleted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

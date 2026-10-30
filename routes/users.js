@@ -5,7 +5,7 @@ const { limitsForTier } = require('../constants');
 const logger = require('../logger');
 const { isDevMode } = require('../config');
 const { maskId } = require('../middleware/requestLog');
-const { hasActiveEntitlement } = require('../billing/revenuecat');
+const { hasActiveEntitlement, deleteSubscriber } = require('../billing/revenuecat');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { matchUserParam } = require('../middleware/auth');
 
@@ -115,6 +115,24 @@ router.post('/:userId/sync-premium', asyncHandler(async (req, res) => {
 
   const record = await userStore.setPremium(userId, isPremium);
   return res.json({ userId: record.userId, isPremium: record.isPremium });
+}));
+
+// DELETE /api/users/:userId
+// Uygulama içi hesap silme (App Store 5.1.1(v) / Google Play hesap silme politikası): kullanıcının
+// bildirim jetonları, tüm takipleri ve kayıt satırı silinir; kimliği "silindi" olarak işaretlenir
+// (bkz. store/userStore.js deleteAccount) — bu yüzden eldeki oturum anahtarı artık 401 döner ve uygulama
+// yeni bir kimlikle sıfırdan başlar. RevenueCat müşteri kaydı da en iyi çabayla silinir.
+// Mağazadaki ABONELİK iptal edilmez (bunu yalnızca Apple/Google yapabilir); mobil arayüz kullanıcıyı
+// bu konuda uyarır.
+router.delete('/:userId', asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const removed = await userStore.deleteAccount(userId);
+  const revenueCat = await deleteSubscriber(userId);
+  logger.info(
+    { userId: maskId(userId), ...removed, revenueCat: revenueCat.ok ? 'deleted' : revenueCat.reason },
+    '[users] hesap silindi'
+  );
+  return res.status(204).send();
 }));
 
 module.exports = router;

@@ -1,4 +1,5 @@
 const { verifyToken } = require('../auth/token');
+const userStore = require('../store/userStore');
 
 function unauthorized(res) {
   return res.status(401).json({
@@ -14,11 +15,17 @@ function forbidden(res) {
 // İstekteki `Authorization: Bearer <token>` başlığını doğrular ve req.userId'ye
 // yazar. Geçersiz/eksik token -> 401. Route'lar kimliği hâlâ gövde/sorgu/yoldaki
 // `userId` ile alıyor; `matchUser` o değerin token'daki kimlikle aynı olmasını sağlar.
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
   const match = typeof header === 'string' ? /^Bearer\s+(\S+)$/i.exec(header) : null;
   const userId = match ? verifyToken(match[1]) : null;
   if (!userId) return unauthorized(res);
+  try {
+    // Silinen hesabın anahtarı hâlâ geçerli bir imzaya sahip: ayrıca reddedilir (401; istemci yeniden kaydolur).
+    if (await userStore.isDeleted(userId)) return unauthorized(res);
+  } catch (err) {
+    return next(err);
+  }
   req.userId = userId;
   return next();
 }

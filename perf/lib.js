@@ -68,7 +68,7 @@ function brandsFor(n) {
 async function reset() {
   assertScratchDb();
   await db.migrate();
-  await db.query('TRUNCATE price_history, subscriptions, device_tokens, tracked_targets, users RESTART IDENTITY CASCADE');
+  await db.query('TRUNCATE price_history, subscriptions, device_tokens, tracked_targets, users, deleted_users RESTART IDENTITY CASCADE');
 }
 
 async function seedUsers(n, premiumRatio = 0.3) {

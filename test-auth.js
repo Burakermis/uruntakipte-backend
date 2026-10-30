@@ -127,7 +127,65 @@ function check(label, actual, expected) {
   process.env.DATABASE_URL = savedDb;
   process.env.NODE_ENV = savedEnv.node;
 
-  console.log('\n--- 8) trust proxy: vekil arkasında doğru istemci IP\'si (sahte başlığa karşı güvenli)');
+  console.log('\n--- 8) hesap silme: veri gider, anahtar ölür, hesap geri doğmaz');
+  const dRes = await call('POST', '/api/auth/register');
+  const D = dRes.json.userId, tokD = dRes.json.token;
+  const eRes = await call('POST', '/api/auth/register');
+  const E = eRes.json.userId, tokE = eRes.json.token;
+  const dTarget = await trackedTargetStore.create({
+    urlKey: 'del-x', brand: 'mango', url: 'https://shop.mango.com/del-x', name: 'D', variants: [{ sku: 's', color: 'c', size: 'M', price: 100, currency: 'TRY', availability: 'in_stock' }],
+  });
+  const dSub = await subscriptionStore.create({ userId: D, targetId: dTarget.id, sku: 's', notifyOnPriceDrop: true });
+  const dGone = await subscriptionStore.create({ userId: D, targetId: dTarget.id, sku: 's2', notifyOnPriceDrop: true });
+  await subscriptionStore.remove(dGone.id); // kaldırılmış (soft-delete) kayıt da silinmeli
+  const eSub = await subscriptionStore.create({ userId: E, targetId: dTarget.id, sku: 's', notifyOnPriceDrop: true });
+  await deviceTokenStore.upsert({ userId: D, expoPushToken: 'ExponentPushToken[d-cihaz]', platform: 'android' });
+  await deviceTokenStore.upsert({ userId: E, expoPushToken: 'ExponentPushToken[e-cihaz]', platform: 'ios' });
+  await userStore.setPremium(D, true);
+  const count = (table, id) => db.query(`SELECT count(*)::int AS n FROM ${table} WHERE user_id = $1`, [id]).then((r) => r.rows[0].n);
+
+  check('başkasının hesabını silemez (token A, yol D) -> 403', (await call('DELETE', `/api/users/${D}`, { token: tokE })).status, 403);
+  check('  ... D\'nin verisi yerinde', [await count('subscriptions', D), await count('device_tokens', D), await count('users', D)], [2, 1, 1]);
+  check('token olmadan -> 401', (await call('DELETE', `/api/users/${D}`)).status, 401);
+
+  check('kendi hesabını siler -> 204', (await call('DELETE', `/api/users/${D}`, { token: tokD })).status, 204);
+  check('abonelikler (kaldırılmış olanlar dahil), cihaz jetonları ve kullanıcı satırı silindi', [await count('subscriptions', D), await count('device_tokens', D), await count('users', D)], [0, 0, 0]);
+  check('kimlik "silindi" olarak işaretlendi', await userStore.isDeleted(D), true);
+  check('ESKİ ANAHTAR artık geçersiz: limits -> 401', (await call('GET', `/api/users/${D}/limits`, { token: tokD })).status, 401);
+  check('  ... liste -> 401', (await call('GET', `/api/products?userId=${D}`, { token: tokD })).status, 401);
+  check('  ... hesap geri DOĞMADI (kullanıcı satırı yok)', await count('users', D), 0);
+  check('  ... ikinci silme isteği de 401 (zaten silinmiş)', (await call('DELETE', `/api/users/${D}`, { token: tokD })).status, 401);
+  check('silinen hesabın cihazına bildirim gitmez (jeton yok)', (await deviceTokenStore.listByUser(D)).length, 0);
+
+  check('diğer kullanıcı (E) etkilenmedi: abonelik + jeton + oturum', [await count('subscriptions', E), await count('device_tokens', E), (await call('GET', `/api/users/${E}/limits`, { token: tokE })).status], [1, 1, 200]);
+  check('ortak ürün kaydı (paylaşımlı) silinmedi', (await trackedTargetStore.findById(dTarget.id)) !== null, true);
+
+  const hook = await call('POST', '/webhooks/revenuecat', { body: { event: { type: 'INITIAL_PURCHASE', app_user_id: D } } });
+  check('silinmiş hesap için RevenueCat olayı: 200 ama hesabı geri doğurmaz', [hook.status, hook.json.ignored, await count('users', D)], [200, 'ACCOUNT_DELETED', 0]);
+
+  const fresh = await call('POST', '/api/auth/register');
+  check('silmeden sonra uygulama yeni kimlikle sıfırdan başlar', [fresh.status, fresh.json.userId !== D, (await call('GET', `/api/users/${fresh.json.userId}/limits`, { token: fresh.json.token })).json.isPremium], [201, true, false]);
+
+  const { deleteSubscriber } = require('./billing/revenuecat');
+  const savedKey = process.env.REVENUECAT_SECRET_KEY;
+  delete process.env.REVENUECAT_SECRET_KEY;
+  check('RevenueCat anahtarı yoksa en iyi çaba atlanır (silmeyi engellemez)', await deleteSubscriber('x'), { ok: false, reason: 'NOT_CONFIGURED' });
+  process.env.REVENUECAT_SECRET_KEY = 'rc-test';
+  const realFetch = global.fetch;
+  const rcCalls = [];
+  const rcReply = (status) => { global.fetch = async (url, init) => { rcCalls.push([init.method, url, init.headers.Authorization]); return { ok: status < 300, status }; }; };
+  rcReply(200);
+  check('RevenueCat müşteri kaydı silinir (DELETE /v1/subscribers/<id>)', [await deleteSubscriber('a/b'), rcCalls[0]], [{ ok: true }, ['DELETE', 'https://api.revenuecat.com/v1/subscribers/a%2Fb', 'Bearer rc-test']]);
+  rcReply(404);
+  check('RevenueCat 404 (kullanıcıyı hiç görmemiş) başarı sayılır', await deleteSubscriber('x'), { ok: true });
+  rcReply(500);
+  check('RevenueCat 500 -> hata sonucu, istisna yok', await deleteSubscriber('x'), { ok: false, reason: 'HTTP_500' });
+  global.fetch = async () => { throw new TypeError('ağ'); };
+  check('ağ hatası -> hata sonucu, istisna yok', await deleteSubscriber('x'), { ok: false, reason: 'NETWORK' });
+  global.fetch = realFetch;
+  if (savedKey === undefined) delete process.env.REVENUECAT_SECRET_KEY; else process.env.REVENUECAT_SECRET_KEY = savedKey;
+
+  console.log('\n--- 9) trust proxy: vekil arkasında doğru istemci IP\'si (sahte başlığa karşı güvenli)');
   const { trustProxyHops, applyTrustProxy } = require('./config');
   const expressLib = require('express');
   const ipOf = async (value, xff) => {
