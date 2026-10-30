@@ -17,7 +17,7 @@
     "test:stradivarius": "node test-stradivarius.js",
     "test:oysho": "node test-oysho.js",
     "test:all": "node test-zara.js && node test-hm.js && node test-pullandbear.js && node test-bershka.js && node test-mango.js && node test-massimodutti.js && node test-stradivarius.js && node test-oysho.js",
-    "test:unit": "node test-mango.js && node test-domain-limiter.js && node test-claim-attempt.js && node test-check-schedule.js && node test-batching.js && node test-security.js && node test-auth.js",
+    "test:unit": "node test-mango.js && node test-domain-limiter.js && node test-claim-attempt.js && node test-check-schedule.js && node test-batching.js && node test-security.js && node test-auth.js && node test-push.js",
     "perf:tick": "node perf/bench-tick.js",
     "perf:history": "node perf/bench-history.js",
     "perf:api": "node perf/bench-api.js",

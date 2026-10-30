@@ -45,4 +45,11 @@ async function removeByUser(userId) {
   return rowCount;
 }
 
-module.exports = { upsert, listByUser, removeByUser };
+// Expo "DeviceNotRegistered" dediği (uygulama silinmiş / bildirim izni kalkmış) bir jetonu, hangi
+// kullanıcıya ait olursa olsun kaldırır — bir daha boşuna gönderim denenmez.
+async function removeByToken(expoPushToken) {
+  const { rowCount } = await db.query('DELETE FROM device_tokens WHERE expo_push_token = $1', [expoPushToken]);
+  return rowCount;
+}
+
+module.exports = { upsert, listByUser, removeByUser, removeByToken };
