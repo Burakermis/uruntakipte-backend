@@ -135,6 +135,8 @@ const post = (base, p, body, headers = {}) =>
   console.log('\n--- 5) dev-premium ucu: yalnızca NODE_ENV=development|test iken açık (fail-closed)');
   const uapp = express();
   uapp.use(express.json());
+  // Kimlik katmanı bu bölümün konusu değil (bkz. test-auth.js); yoldaki id'yi oturum sahibi say.
+  uapp.use('/api/users/:userId', (req, _res, next) => { req.userId = req.params.userId; next(); });
   uapp.use('/api/users', require('./routes/users'));
   const usr = await serve(uapp);
   const savedNode = process.env.NODE_ENV;

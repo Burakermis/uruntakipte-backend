@@ -7,8 +7,12 @@ const { isDevMode } = require('../config');
 const { maskId } = require('../middleware/requestLog');
 const { hasActiveEntitlement } = require('../billing/revenuecat');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { matchUserParam } = require('../middleware/auth');
 
 const router = express.Router();
+
+// Yoldaki :userId her zaman token'daki kimlikle aynı olmalı (başkasının planını okuyamaz/değiştiremez).
+router.param('userId', matchUserParam);
 
 const REVENUECAT_API_BASE = 'https://api.revenuecat.com/v1';
 

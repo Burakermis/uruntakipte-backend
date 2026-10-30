@@ -22,4 +22,14 @@ const generalLimiter = rateLimit({
   message: { error: 'RATE_LIMITED', message: 'Çok fazla istek gönderildi, lütfen biraz sonra tekrar dene.' },
 });
 
-module.exports = { productsLimiter, generalLimiter };
+// Yeni kimlik üretimi: yeniden kurulumla ücretsiz limiti sıfırlamayı ve kullanıcı
+// tablosunu şişirmeyi yavaşlatır (IP başına saatte 20; bellek içi, bkz. güvenlik notları).
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'RATE_LIMITED', message: 'Çok fazla istek gönderildi, lütfen biraz sonra tekrar dene.' },
+});
+
+module.exports = { productsLimiter, generalLimiter, registerLimiter };

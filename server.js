@@ -6,6 +6,9 @@ const productsRouter = require('./routes/products');
 const devicesRouter = require('./routes/devices');
 const usersRouter = require('./routes/users');
 const webhooksRouter = require('./routes/webhooks');
+const authRouter = require('./routes/auth');
+const { requireAuth, matchUser } = require('./middleware/auth');
+const { assertConfigured: assertAuthConfigured } = require('./auth/token');
 const { BRANDS } = require('./scraper/registry');
 const { startWorker } = require('./worker');
 const { closeBrowser, prewarmBrowser } = require('./scraper/browserFetch');
@@ -35,9 +38,14 @@ app.get('/api/health', (_req, res) => {
 // products router özellikle scraping'i tetikleyen (resolve/create) uçları
 // içeriyor — genel sınırın üzerine daha sıkı bir ek sınır (bkz.
 // middleware/rateLimit.js).
-app.use('/api/products', productsLimiter, productsRouter);
-app.use('/api/devices', devicesRouter);
-app.use('/api/users', usersRouter);
+// Kimlik: yalnızca /api/auth/register (token üretir), /api/health ve RevenueCat
+// webhook'u (kendi secret'ıyla) açık; geri kalan HER /api ucu geçerli bir
+// `Authorization: Bearer` token'ı ister ve gövde/sorgu/yoldaki userId'nin
+// token'daki kimlikle aynı olmasını şart koşar (bkz. middleware/auth.js).
+app.use('/api/auth', authRouter);
+app.use('/api/products', requireAuth, matchUser, productsLimiter, productsRouter);
+app.use('/api/devices', requireAuth, matchUser, devicesRouter);
+app.use('/api/users', requireAuth, matchUser, usersRouter);
 app.use('/webhooks', webhooksRouter);
 
 // Merkezi hata middleware'i — TÜM route'lardan SONRA eklenmeli (Express,
@@ -70,6 +78,8 @@ if (require.main === module) {
   (async () => {
     // Şema idempotent (CREATE TABLE IF NOT EXISTS) — her açılışta çalıştırmak
     // güvenli, ayrı bir migration adımı gerektirmiyor (bkz. store/db.js).
+    // Canlıda AUTH_SECRET yoksa/kısaysa burada patlar (fail-closed).
+    assertAuthConfigured();
     await db.migrate();
 
     // Geliştirme kolaylıkları (kimliksiz /users/:id/premium ucu, fixture yedeği,
