@@ -192,6 +192,25 @@ const post = (base, p, body, headers = {}) =>
   check('aynı kullanıcı tekrar kaydolunca yinelenmez', (await deviceTokenStore.listByUser('kurban')).length, 1);
   check('  ... ve platform güncellenir', (await deviceTokenStore.listByUser('kurban'))[0].platform, 'android');
 
+  console.log('\n--- 8) bildirimleri kapatma (DELETE /api/devices): yalnızca kendi kayıtları silinir');
+  const dapp = express();
+  dapp.use(express.json());
+  dapp.use('/api/devices', require('./routes/devices'));
+  const dv = await serve(dapp);
+  const del = (p) => fetch(dv.base + p, { method: 'DELETE' }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => null) }));
+  check('userId olmadan -> 400', (await del('/api/devices')).status, 400);
+  check('userId dizi olarak -> 400', (await del('/api/devices?userId=a&userId=b')).status, 400);
+  check("saldırganın bildirimini kapatması kurbanın token'ına dokunmaz", (await del('/api/devices?userId=saldirgan')).status, 204);
+  check("  ... kurban token'ını hâlâ alıyor", (await deviceTokenStore.listByUser('kurban')).map((t) => t.expoPushToken), [TOKEN]);
+  check('  ... saldırganın kendi kaydı silindi', (await deviceTokenStore.listByUser('saldirgan')).length, 0);
+  await deviceTokenStore.upsert({ userId: 'kurban', expoPushToken: 'ExponentPushToken[kurban-ikinci]', platform: 'ios' });
+  check('kurban bildirimleri kapatınca -> 204', (await del('/api/devices?userId=kurban')).status, 204);
+  check('  ... tüm token kayıtları silindi (bildirim gönderilmez)', (await deviceTokenStore.listByUser('kurban')).length, 0);
+  check('kayıt yokken tekrar kapatmak hata vermez (idempotent)', (await del('/api/devices?userId=kurban')).status, 204);
+  await deviceTokenStore.upsert({ userId: 'kurban', expoPushToken: TOKEN, platform: 'ios' });
+  check('anahtar tekrar açılınca yeniden kaydolabilir', (await deviceTokenStore.listByUser('kurban')).map((t) => t.expoPushToken), [TOKEN]);
+  dv.close();
+
   console.log(`\n${ok ? '✔ Tüm testler geçti' : '✘ Bazı testler başarısız'}`);
   await db.pool.end();
   process.exit(ok ? 0 : 1);
