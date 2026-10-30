@@ -16,7 +16,7 @@ const { WORKER_TICK_MS } = require('./constants');
 const db = require('./store/db');
 const { retentionQueue } = require('./queue/scrapeQueue');
 const { productsLimiter, generalLimiter } = require('./middleware/rateLimit');
-const { isDevMode } = require('./config');
+const { isDevMode, assertProductionConfig } = require('./config');
 
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // günde bir kez yeter
 
@@ -80,6 +80,7 @@ if (require.main === module) {
     // güvenli, ayrı bir migration adımı gerektirmiyor (bkz. store/db.js).
     // Canlıda AUTH_SECRET yoksa/kısaysa burada patlar (fail-closed).
     assertAuthConfigured();
+    assertProductionConfig();
     await db.migrate();
 
     // Geliştirme kolaylıkları (kimliksiz /users/:id/premium ucu, fixture yedeği,
@@ -117,7 +118,13 @@ if (require.main === module) {
     // job'u tekilleştirir, her sunucu yeniden başlatmasında yeniden
     // eklemek zararsız (yinelenmiyor).
     await retentionQueue.add('prune-price-history', {}, { repeat: { every: RETENTION_INTERVAL_MS } });
-  })();
+  })().catch((err) => {
+    // Açılış hatası (ör. AUTH_SECRET eksik, DB/Redis erişilemiyor) ölümcül: aşağıdaki
+    // unhandledRejection işleyicisi süreci AYAKTA tutar, bu da dinlemeyen bir "zombi"
+    // sunucu bırakırdı (konteyner çalışıyor görünür ama hiçbir şey yanıtlamaz).
+    logger.fatal({ err: err instanceof Error ? err.message : String(err) }, '[server] açılış başarısız, süreç kapanıyor');
+    process.exit(1);
+  });
 
   // Chromium arka planda açık kalmasın diye process kapanırken temizle.
   const shutdown = async () => {

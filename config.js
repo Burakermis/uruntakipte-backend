@@ -8,4 +8,20 @@ function isDevMode() {
   return env === 'development' || env === 'test';
 }
 
-module.exports = { isDevMode };
+// Canlıda bilinen geliştirme parolasıyla (docker-compose.yml'deki `trackprice`) çalışmayı
+// reddeder: veritabanı yanlışlıkla ağa açılırsa herkesin girebileceği bir parola olurdu.
+// Her iki süreç (API ve worker) açılışta çağırır.
+function assertProductionConfig() {
+  if (process.env.NODE_ENV !== 'production') return;
+  let password = '';
+  try {
+    password = decodeURIComponent(new URL(process.env.DATABASE_URL || '').password);
+  } catch {
+    // DATABASE_URL yok/bozuk: bağlantı zaten kurulamaz, ayrıca şikâyet etmeye gerek yok.
+  }
+  if (password === 'trackprice') {
+    throw new Error('DATABASE_URL varsayılan geliştirme parolasını (trackprice) kullanıyor. Canlıda POSTGRES_PASSWORD ile güçlü bir parola verin.');
+  }
+}
+
+module.exports = { isDevMode, assertProductionConfig };

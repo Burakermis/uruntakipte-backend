@@ -1,9 +1,13 @@
 const { Queue, QueueEvents } = require('bullmq');
 const { SCRAPE_JOB_TIMEOUT_MS } = require('../constants');
 
+// Yönetilen Redis (Upstash, Redis Cloud, Elasticache...) genellikle parola ve TLS ister:
+// REDIS_PASSWORD verilirse kullanılır, REDIS_TLS=1 ise bağlantı TLS ile kurulur.
 const connection = {
   host: process.env.REDIS_HOST || 'localhost',
   port: Number(process.env.REDIS_PORT || 6379),
+  ...(process.env.REDIS_PASSWORD ? { password: process.env.REDIS_PASSWORD } : {}),
+  ...(process.env.REDIS_TLS === '1' ? { tls: {} } : {}),
 };
 
 // BullMQ tamamlanan/başarısız job kayıtlarını VARSAYILAN OLARAK SONSUZA KADAR

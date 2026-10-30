@@ -112,6 +112,21 @@ function check(label, actual, expected) {
   check('anahtarsız production: hiçbir token geçerli değil', verifyToken(`${A}.${'A'.repeat(43)}`), null);
   process.env.NODE_ENV = savedEnv.node; process.env.AUTH_SECRET = savedEnv.secret;
 
+  console.log('\n--- 7) canlıda varsayılan veritabanı parolası reddedilir');
+  const { assertProductionConfig } = require('./config');
+  const dbTry = (env, url) => {
+    process.env.NODE_ENV = env;
+    process.env.DATABASE_URL = url;
+    try { assertProductionConfig(); return 'ok'; } catch { return 'hata'; }
+  };
+  const savedDb = process.env.DATABASE_URL;
+  check('production + trackprice parolası -> açılmaz', dbTry('production', 'postgres://trackprice:trackprice@db:5432/trackprice'), 'hata');
+  check('production + güçlü parola -> açılır', dbTry('production', 'postgres://trackprice:Gz8-k2LmQx@db:5432/trackprice'), 'ok');
+  check('production + DATABASE_URL yok -> parola şikâyeti yok', dbTry('production', ''), 'ok');
+  check('development + trackprice -> açılır (yerel akış)', dbTry('development', 'postgres://trackprice:trackprice@localhost:5433/trackprice'), 'ok');
+  process.env.DATABASE_URL = savedDb;
+  process.env.NODE_ENV = savedEnv.node;
+
   server.close();
   console.log(`\n${ok ? '✔ Tüm testler geçti' : '✘ Bazı testler başarısız'}`);
   await db.pool.end();

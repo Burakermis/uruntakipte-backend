@@ -15,6 +15,10 @@ const { isTargetDue } = require('../checkSchedule');
 const { prewarmBrowser } = require('../scraper/browserFetch');
 const htmlCache = require('../store/htmlCache');
 const logger = require('../logger');
+const { assertProductionConfig } = require('../config');
+
+// Canlıda varsayılan veritabanı parolasıyla açılma (bkz. config.js); fırlatırsa süreç kapanır.
+assertProductionConfig();
 
 // Varsayılan 5. ÖLÇÜM (perf/bench-worker.js, gerçekçi marka karışımı, alan-adı
 // aralığı ZORLANIRKEN): 5 slotla tek worker ~105 kontrol/dk, 10 slotla ~130.
