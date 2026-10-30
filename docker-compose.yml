@@ -37,6 +37,9 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgres://trackprice:${POSTGRES_PASSWORD:-trackprice}@postgres:5432/trackprice
       REDIS_HOST: redis
+      # Önünde tek bir ters vekil (Caddy/nginx) var: rate limit ve loglar gerçek istemci IP'sini görsün.
+      # Vekilsiz doğrudan internete açarsan 0 yap (yoksa istemci IP'sini uydurabilir).
+      TRUST_PROXY: ${TRUST_PROXY:-1}
     ports:
       # Ters vekil (Caddy/nginx) 4000'e bağlanır; doğrudan internete açma.
       - "127.0.0.1:4000:4000"

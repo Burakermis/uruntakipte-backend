@@ -127,6 +127,28 @@ function check(label, actual, expected) {
   process.env.DATABASE_URL = savedDb;
   process.env.NODE_ENV = savedEnv.node;
 
+  console.log('\n--- 8) trust proxy: vekil arkasında doğru istemci IP\'si (sahte başlığa karşı güvenli)');
+  const { trustProxyHops, applyTrustProxy } = require('./config');
+  const expressLib = require('express');
+  const ipOf = async (value, xff) => {
+    const probe = expressLib();
+    applyTrustProxy(probe, value);
+    probe.get('/ip', (req, res) => res.json({ ip: req.ip }));
+    const srv = await new Promise((resolve) => { const s = probe.listen(0, () => resolve(s)); });
+    const r = await fetch(`http://127.0.0.1:${srv.address().port}/ip`, { headers: xff ? { 'X-Forwarded-For': xff } : {} });
+    srv.close();
+    return (await r.json()).ip.replace('::ffff:', '');
+  };
+  check('tanımsız: başlık yok sayılır (bağlantı adresi)', await ipOf(undefined, '9.9.9.9'), '127.0.0.1');
+  check('0: başlık yok sayılır', await ipOf('0', '9.9.9.9'), '127.0.0.1');
+  check('1 vekil: vekilin eklediği son adres', await ipOf('1', '9.9.9.9'), '9.9.9.9');
+  check('1 vekil: istemci başa sahte adres eklese de vekilin gördüğü alınır', await ipOf('1', '6.6.6.6, 9.9.9.9'), '9.9.9.9');
+  check('2 vekil: bir önceki adres', await ipOf('2', '6.6.6.6, 9.9.9.9'), '6.6.6.6');
+  for (const bad of ['true', 'yes', '-1', '1.5', '99', 'abc']) {
+    check(`geçersiz değer reddedilir: ${bad}`, (() => { try { trustProxyHops(bad); return 'ok'; } catch { return 'hata'; } })(), 'hata');
+  }
+  check('boş değer = vekil yok', trustProxyHops(''), 0);
+
   server.close();
   console.log(`\n${ok ? '✔ Tüm testler geçti' : '✘ Bazı testler başarısız'}`);
   await db.pool.end();

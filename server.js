@@ -16,12 +16,15 @@ const { WORKER_TICK_MS } = require('./constants');
 const db = require('./store/db');
 const { retentionQueue } = require('./queue/scrapeQueue');
 const { productsLimiter, generalLimiter } = require('./middleware/rateLimit');
-const { isDevMode, assertProductionConfig } = require('./config');
+const { isDevMode, assertProductionConfig, applyTrustProxy } = require('./config');
 
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // günde bir kez yeter
 
 const app = express();
 app.disable('x-powered-by'); // sunucu yığınını ilan etmeye gerek yok
+// Ters vekil arkasında doğru istemci IP'si (hız sınırı + log) için: TRUST_PROXY=<vekil sayısı>.
+// Geçersiz değer burada fırlatır ve süreç açılmaz.
+applyTrustProxy(app);
 app.use(cors());
 // Kimlik başlıkları ve userId maskeli loglanır (bkz. middleware/requestLog.js).
 app.use(createRequestLogger(logger));

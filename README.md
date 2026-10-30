@@ -29,6 +29,7 @@ docker compose --env-file .env.production --profile app up -d --build
 
 Dikkat:
 - `NODE_ENV=production`, `AUTH_SECRET` (≥32 karakter) ve varsayılan olmayan bir veritabanı parolası **zorunlu**; yoksa süreç 1 koduyla kapanır.
-- API 4000'i yalnızca `127.0.0.1`'e bağlar; internete bir ters vekil (TLS) üzerinden aç. Vekil arkasında `trust proxy` ayarı henüz yok (rate limit IP'si yanlış görünür).
+- API 4000'i yalnızca `127.0.0.1`'e bağlar; internete bir ters vekil (TLS) üzerinden aç. Vekil arkasında `TRUST_PROXY=<vekil sayısı>` ver (compose'ta varsayılan 1); yoksa hız sınırı herkesi tek IP sayar. Vekilsiz doğrudan açıyorsan `0` bırak.
+- Sağlık kontrolü (`/api/health`) loglanmaz; 4xx `warn`, 5xx `error` seviyesinde yazılır.
 - `PLAYWRIGHT` sürümü imaj etiketiyle (`Dockerfile`) aynı olmalı; `playwright` paketini yükseltirsen etiketi de güncelle.
 - Yönetilen Redis için `REDIS_PASSWORD` ve `REDIS_TLS=1`; yönetilen Postgres için `DATABASE_URL` sonuna `?sslmode=require`.

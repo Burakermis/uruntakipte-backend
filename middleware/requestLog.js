@@ -29,12 +29,36 @@ function maskUserIdIn(record) {
   return { ...record, userId: maskId(record.userId) };
 }
 
+// Sağlık kontrolü (yük dengeleyici/konteyner her ~30sn çağırır) loglanmaz: günde binlerce
+// anlamsız satır. Hata dönerse yine görünür (aşağıdaki seviye kuralı yalnızca ignore'u atlatır).
+const SILENT_PATHS = new Set(['/api/health']);
+
 function createRequestLogger(logger = defaultLogger) {
   return pinoHttp({
     logger,
+    autoLogging: {
+      ignore: (req) => SILENT_PATHS.has((req.url || '').split('?')[0]),
+    },
+    // 5xx hata, 4xx uyarı, geri kalanı bilgi: log toplayıcıda sorunlar süzülebilsin.
+    customLogLevel: (_req, res, err) => (err || res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info'),
     serializers: {
+      // Yalnızca işe yarayanlar: eskiden TÜM istek başlıkları ve TÜM yanıt başlıkları (rate limit,
+      // etag, cors...) her satıra yazılıyordu. Kimlik taşıyan başlıklar zaten hiç loglanmaz.
       req(req) {
-        return { ...req, url: scrubUrl(req.url), query: maskUserIdIn(req.query), params: maskUserIdIn(req.params) };
+        return {
+          id: req.id,
+          method: req.method,
+          url: scrubUrl(req.url),
+          query: maskUserIdIn(req.query),
+          params: maskUserIdIn(req.params),
+          // Vekil arkasında remoteAddress vekilin adresidir; gerçek istemci için Express'in req.ip'si
+          // (trust proxy ayarına göre, bkz. config.js applyTrustProxy).
+          ip: req.raw?.ip ?? req.remoteAddress,
+          userAgent: req.headers?.['user-agent'],
+        };
+      },
+      res(res) {
+        return { statusCode: res.statusCode };
       },
     },
   });

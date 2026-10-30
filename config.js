@@ -24,4 +24,24 @@ function assertProductionConfig() {
   }
 }
 
-module.exports = { isDevMode, assertProductionConfig };
+// Ters vekil (nginx/Caddy/yük dengeleyici) arkasında Express bağlantının IP'sini vekilin adresi
+// sanır; hız sınırı da herkesi TEK istemci sayıp ilk kullanıcıdan sonra hepsini keserdi.
+// TRUST_PROXY = istek ile uygulama arasındaki GÜVENİLİR vekil sayısı (ör. tek vekil için 1).
+// Bilerek sadece sayı kabul edilir: `true` her X-Forwarded-For başlığına güvenir ve istemci
+// kendi IP'sini uydurarak hız sınırını aşar. Tanımsız/0 = vekil yok (başlıklar yok sayılır).
+function trustProxyHops(value = process.env.TRUST_PROXY) {
+  if (value === undefined || value === '') return 0;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 10) {
+    throw new Error(`TRUST_PROXY geçersiz ("${value}"): güvenilen vekil sayısını (0-10 arası tam sayı) verin; "true" kabul edilmez.`);
+  }
+  return n;
+}
+
+function applyTrustProxy(app, value) {
+  const hops = trustProxyHops(value);
+  app.set('trust proxy', hops === 0 ? false : hops);
+  return hops;
+}
+
+module.exports = { isDevMode, assertProductionConfig, trustProxyHops, applyTrustProxy };
