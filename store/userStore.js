@@ -62,10 +62,11 @@ async function deleteAccount(userId) {
     await client.query('BEGIN');
     const tokens = await client.query('DELETE FROM device_tokens WHERE user_id = $1', [userId]);
     const subs = await client.query('DELETE FROM subscriptions WHERE user_id = $1', [userId]);
+    const notes = await client.query('DELETE FROM notifications WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM users WHERE user_id = $1', [userId]);
     await client.query('INSERT INTO deleted_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING', [userId]);
     await client.query('COMMIT');
-    return { deviceTokens: tokens.rowCount, subscriptions: subs.rowCount };
+    return { deviceTokens: tokens.rowCount, subscriptions: subs.rowCount, notifications: notes.rowCount };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;

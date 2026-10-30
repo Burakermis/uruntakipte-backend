@@ -24,6 +24,20 @@ function assertProductionConfig() {
   }
 }
 
+// CORS yalnızca TARAYICIDAN gelen isteklere gerekir; mobil uygulama (React Native) CORS kullanmaz ve web sitesi
+// API'yi çağırmaz. Bu yüzden canlıda varsayılan "kapalı" (başlık hiç eklenmez); yalnızca RN Web önizlemesi gibi
+// geliştirme kullanımları için geliştirme modunda herkese açık. Belirli bir tarayıcı kökenine izin vermek için
+// CORS_ORIGINS=https://a.com,https://b.com (virgülle ayrılmış). Dönüş: cors() seçenekleri ya da null (CORS yok).
+function corsOptions(env = process.env) {
+  const origins = String(env.CORS_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+  if (origins.length > 0) return { origin: origins };
+  const nodeEnv = env.NODE_ENV;
+  return nodeEnv === 'development' || nodeEnv === 'test' ? {} : null;
+}
+
 // Ters vekil (nginx/Caddy/yük dengeleyici) arkasında Express bağlantının IP'sini vekilin adresi
 // sanır; hız sınırı da herkesi TEK istemci sayıp ilk kullanıcıdan sonra hepsini keserdi.
 // TRUST_PROXY = istek ile uygulama arasındaki GÜVENİLİR vekil sayısı (ör. tek vekil için 1).
@@ -44,4 +58,4 @@ function applyTrustProxy(app, value) {
   return hops;
 }
 
-module.exports = { isDevMode, assertProductionConfig, trustProxyHops, applyTrustProxy };
+module.exports = { isDevMode, assertProductionConfig, trustProxyHops, applyTrustProxy, corsOptions };

@@ -33,3 +33,20 @@ Dikkat:
 - Sağlık kontrolü (`/api/health`) loglanmaz; 4xx `warn`, 5xx `error` seviyesinde yazılır.
 - `PLAYWRIGHT` sürümü imaj etiketiyle (`Dockerfile`) aynı olmalı; `playwright` paketini yükseltirsen etiketi de güncelle.
 - Yönetilen Redis için `REDIS_PASSWORD` ve `REDIS_TLS=1`; yönetilen Postgres için `DATABASE_URL` sonuna `?sslmode=require`.
+
+## Yedekleme ve geri yükleme
+
+```bash
+./scripts/backup.sh                                  # backups/trackprice-<tarih>.sql.gz üretir, 14 günden eskileri siler
+./scripts/restore.sh backups/<dosya>.sql.gz --yes    # MEVCUT verinin üzerine yazar; önce API ve worker'ı durdurun
+```
+
+- Günlük otomatik yedek için cron/systemd zamanlayıcısı ekleyin (betiğin başındaki yoruma bakın).
+- Yedekler sunucu diskinde durur: `backups/` klasörünü ayrıca başka bir yere (nesne depolama, başka makine) kopyalayın.
+- Betik boş/bozuk yedeği saklamaz (sıkıştırma bütünlüğü + tablo tanımı kontrolü). Geri yüklemeyi **düzenli olarak bir deneme veritabanında** deneyin.
+
+## İzleme
+
+- `node scripts/brand-health.js`: marka bazlı tarama sağlığı (aktif / ardışık hata veren hedef sayısı, en sık hata). Worker bunu 30 dakikada bir loglar; bir markanın aktif hedeflerinin ≥%50'si (en az 3 hedef) ardışık hata veriyorsa `error` seviyesinde `[health] ... sağlıksız` yazar.
+- Push teslimat makbukları ~15 dk sonra kontrol edilir; FCM/APNs kimlik bilgisi hatası `error` seviyesinde `TESLİMAT HATASI` olarak loglanır.
+- Bir ürün 10 ardışık taramada okunamazsa (yaklaşık bir gün) takipçilerine bir kez "takip edilemiyor" bildirimi gider.

@@ -64,4 +64,17 @@ const retentionQueue = new Queue('retention', {
   defaultJobOptions: { removeOnComplete: { age: 7 * 24 * 60 * 60, count: 30 }, removeOnFail: RETENTION.failed },
 });
 
-module.exports = { connection, scrapeQueue, scrapeQueueEvents, checkQueue, retentionQueue };
+// "push-receipts" — gönderilen push biletlerinin gecikmeli teslimat makbuzu kontrolü (bkz.
+// notifications/receipts.js). Makbuz ~15 dk sonra hazır olur; hazır değilse iş yeniden denenir.
+const RECEIPT_DELAY_MS = 15 * 60 * 1000;
+const receiptQueue = new Queue('push-receipts', {
+  connection,
+  defaultJobOptions: {
+    removeOnComplete: { age: 60 * 60, count: 100 },
+    removeOnFail: RETENTION.failed,
+    attempts: 3,
+    backoff: { type: 'fixed', delay: 10 * 60 * 1000 },
+  },
+});
+
+module.exports = { connection, scrapeQueue, scrapeQueueEvents, checkQueue, retentionQueue, receiptQueue, RECEIPT_DELAY_MS };

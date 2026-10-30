@@ -1,13 +1,14 @@
 const express = require('express');
 const userStore = require('../store/userStore');
 const subscriptionStore = require('../store/subscriptionStore');
-const { limitsForTier } = require('../constants');
+const { limitsForTier, NOTIFICATION_RETENTION_DAYS } = require('../constants');
 const logger = require('../logger');
 const { isDevMode } = require('../config');
 const { maskId } = require('../middleware/requestLog');
 const { hasActiveEntitlement, deleteSubscriber } = require('../billing/revenuecat');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { matchUserParam } = require('../middleware/auth');
+const notificationStore = require('../store/notificationStore');
 
 const router = express.Router();
 
@@ -115,6 +116,20 @@ router.post('/:userId/sync-premium', asyncHandler(async (req, res) => {
 
   const record = await userStore.setPremium(userId, isPremium);
   return res.json({ userId: record.userId, isPremium: record.isPremium });
+}));
+
+// GET /api/users/:userId/notifications?limit=50
+// Bildirim geçmişi (en yeniden eskiye). Kayıtlar kısa ömürlüdür: NOTIFICATION_RETENTION_DAYS gün sonra
+// otomatik silinir (bkz. store/notificationStore.js) — yanıttaki retentionDays mobil ekranda gösterilir.
+router.get('/:userId/notifications', asyncHandler(async (req, res) => {
+  const items = await notificationStore.listByUser(req.params.userId, req.query.limit);
+  return res.json({ items, retentionDays: NOTIFICATION_RETENTION_DAYS });
+}));
+
+// DELETE /api/users/:userId/notifications — kullanıcı geçmişini kendisi temizler (idempotent).
+router.delete('/:userId/notifications', asyncHandler(async (req, res) => {
+  await notificationStore.removeByUser(req.params.userId);
+  return res.status(204).send();
 }));
 
 // DELETE /api/users/:userId

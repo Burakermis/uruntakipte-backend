@@ -1,3 +1,7 @@
+// Hata izleme (SENTRY_DSN yoksa no-op): diğer modüllerden ÖNCE başlatılır.
+const { initSentry, captureError, flush: flushSentry } = require('../monitoring/sentry');
+initSentry('worker');
+
 // Ayrı bir process olarak çalışır (npm run worker) — API sunucusundan
 // (server.js) bağımsız. Böylece Playwright/fetch işi API'nin istek-yanıt
 // döngüsünü bloklamaz ve concurrency (aynı anda kaç Chromium/istek) burada,
@@ -10,6 +14,9 @@ const { resolveProductFromHtml } = require('../scraper/registry');
 const { normalizeTrackingUrl } = require('../scraper/normalizeUrl');
 const trackedTargetStore = require('../store/trackedTargetStore');
 const priceHistoryStore = require('../store/priceHistoryStore');
+const notificationStore = require('../store/notificationStore');
+const { processReceipts } = require('../notifications/receipts');
+const { reportBrandHealth } = require('../monitoring/brandHealth');
 const { checkTrackedTarget } = require('../checker');
 const { isTargetDue } = require('../checkSchedule');
 const { prewarmBrowser } = require('../scraper/browserFetch');
@@ -156,19 +163,45 @@ async function processCheckJob(job) {
 
 // 90 günden eski, fiyat/durumu son kayıttan farklı OLMAYAN ardışık priceHistory
 // kayıtlarını buda (bkz. priceHistoryStore.pruneUnchanged).
-async function processRetentionJob() {
+async function processRetentionJob(job) {
+  // Aynı kuyrukta iki tekrarlayan iş: günlük temizlik ve 30 dakikada bir marka sağlığı raporu.
+  if (job?.name === 'brand-health') {
+    const brands = await reportBrandHealth();
+    return { brands: brands.length, unhealthy: brands.filter((b) => b.unhealthy).map((b) => b.brand) };
+  }
   const deleted = await priceHistoryStore.pruneUnchanged(90);
-  logger.info({ deleted }, '[worker-process] retention tamamlandı');
-  return { deleted };
+  // Bildirim geçmişi: NOTIFICATION_RETENTION_DAYS günden eskileri sil (bkz. store/notificationStore.js).
+  const notificationsDeleted = await notificationStore.pruneOlderThan();
+  logger.info({ deleted, notificationsDeleted }, '[worker-process] retention tamamlandı');
+  return { deleted, notificationsDeleted };
+}
+
+// Push teslimat makbuzları (bkz. notifications/receipts.js): hazır olmayanlar iş verisinde bırakılıp iş
+// yeniden denenir (kuyruk: 3 deneme, aralarında 10 dk); son denemede hâlâ hazır olmayanlar loglanıp bırakılır.
+async function processReceiptJob(job) {
+  const result = await processReceipts(job.data.entries);
+  const lastAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+  if (result.pending.length > 0 && !lastAttempt) {
+    await job.updateData({ entries: result.pending });
+    throw new Error(`${result.pending.length} makbuz henüz hazır değil`);
+  }
+  if (result.pending.length > 0) {
+    logger.warn({ pending: result.pending.length }, '[push] makbuzlar hiç hazır olmadı, vazgeçildi');
+  }
+  logger.info({ ok: result.ok, failed: result.failed, removed: result.removed }, '[push] makbuz kontrolü tamamlandı');
+  return { ok: result.ok, failed: result.failed, removed: result.removed };
 }
 
 const scrapeWorker = new Worker('scrape', processScrapeJob, { connection, concurrency: SCRAPE_CONCURRENCY });
 const checkWorker = new Worker('check', processCheckJob, { connection, concurrency: CHECK_CONCURRENCY });
 const retentionWorker = new Worker('retention', processRetentionJob, { connection, concurrency: 1 });
+const receiptWorker = new Worker('push-receipts', processReceiptJob, { connection, concurrency: 1 });
 
-for (const worker of [scrapeWorker, checkWorker, retentionWorker]) {
+for (const worker of [scrapeWorker, checkWorker, retentionWorker, receiptWorker]) {
   worker.on('failed', (job, err) => {
     logger.error({ queue: worker.name, jobId: job?.id, err: err.message }, '[worker-process] job başarısız');
+    // Makbuz işi "henüz hazır değil" diye bilerek hata fırlatıp yeniden denenir: gürültü olmasın.
+    if (worker.name !== 'push-receipts') captureError(err, { queue: worker.name, jobId: job?.id });
   });
 }
 
@@ -191,10 +224,12 @@ process.on('unhandledRejection', (reason) => {
     { err: reason instanceof Error ? reason.message : String(reason) },
     '[worker-process] yakalanmamış promise reddi — worker ayakta tutuluyor'
   );
+  captureError(reason);
 });
 
 async function shutdown() {
-  await Promise.all([scrapeWorker.close(), checkWorker.close(), retentionWorker.close()]);
+  await Promise.all([scrapeWorker.close(), checkWorker.close(), retentionWorker.close(), receiptWorker.close()]);
+  await flushSentry();
   process.exit(0);
 }
 process.on('SIGINT', shutdown);

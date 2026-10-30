@@ -6,6 +6,7 @@
 // https://docs.expo.dev/push-notifications/sending-notifications/
 const logger = require('../logger');
 const deviceTokenStore = require('../store/deviceTokenStore');
+const { receiptQueue, RECEIPT_DELAY_MS } = require('../queue/scrapeQueue');
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 // Expo tek istekte en fazla 100 mesaj kabul ediyor.
@@ -60,7 +61,7 @@ async function sendExpoPush(tokens, { title, body, data }) {
     json.data.forEach((ticket, i) => {
       if (ticket?.status === 'ok') {
         result.sent += 1;
-        result.tickets.push(ticket.id);
+        result.tickets.push({ id: ticket.id, token: batch[i]?.to });
         return;
       }
       result.failed += 1;
@@ -75,6 +76,14 @@ async function sendExpoPush(tokens, { title, body, data }) {
       result.removed += await deviceTokenStore.removeByToken(token);
     } catch (err) {
       logger.warn({ err: err.message }, '[push] geçersiz jeton silinemedi');
+    }
+  }
+  // Teslimat makbuzları gecikmeli kontrol edilir (bkz. receipts.js). Kuyruk hatası gönderimi bozmaz.
+  if (result.tickets.length > 0) {
+    try {
+      await receiptQueue.add('check-receipts', { entries: result.tickets }, { delay: RECEIPT_DELAY_MS });
+    } catch (err) {
+      logger.warn({ err: err.message }, '[push] makbuz kontrolü kuyruğa eklenemedi');
     }
   }
   if (unregistered.length > 0) {

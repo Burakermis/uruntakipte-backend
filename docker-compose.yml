@@ -3,6 +3,9 @@ name: uruntakipte
 services:
   redis:
     image: redis:7-alpine
+    # BullMQ için: kuyruk Redis'te yaşar. noeviction -> bellek dolarsa rastgele anahtar silmek yerine yazma hatası
+    # verir (sessiz veri kaybı olmaz); appendonly -> yeniden başlatmada kuyruk işleri kaybolmaz.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     ports:
       # Yalnızca yerel makine: "6379:6379" Redis'i (şifresiz) ağdaki herkese açıyordu.
       - "127.0.0.1:6379:6379"

@@ -207,6 +207,14 @@ function check(label, actual, expected) {
   }
   check('boş değer = vekil yok', trustProxyHops(''), 0);
 
+  console.log('\n--- 10) CORS: canlıda varsayılan KAPALI (mobil uygulama CORS kullanmaz)');
+  const { corsOptions } = require('./config');
+  check('production, CORS_ORIGINS yok -> CORS yok', corsOptions({ NODE_ENV: 'production' }), null);
+  check('NODE_ENV tanımsız -> CORS yok (fail-closed)', corsOptions({}), null);
+  check('development -> herkese açık (RN Web önizlemesi)', corsOptions({ NODE_ENV: 'development' }), {});
+  check('test -> açık', corsOptions({ NODE_ENV: 'test' }), {});
+  check('CORS_ORIGINS verilirse yalnızca o kökenler (boşluklar temizlenir)', corsOptions({ NODE_ENV: 'production', CORS_ORIGINS: ' https://a.com , https://b.com ,' }), { origin: ['https://a.com', 'https://b.com'] });
+
   server.close();
   console.log(`\n${ok ? '✔ Tüm testler geçti' : '✘ Bazı testler başarısız'}`);
   await db.pool.end();

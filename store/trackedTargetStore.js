@@ -26,6 +26,7 @@ function mapRow(row) {
     lastCheckedAt: row.last_checked_at ? row.last_checked_at.toISOString() : null,
     lastAttemptAt: row.last_attempt_at ? row.last_attempt_at.toISOString() : null,
     lastCheckStatus: row.last_check_status,
+    failureNotifiedAt: row.failure_notified_at ? row.failure_notified_at.toISOString() : null,
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -99,6 +100,7 @@ const COLUMN_MAP = {
   lastCheckedAt: 'last_checked_at',
   lastAttemptAt: 'last_attempt_at',
   lastCheckStatus: 'last_check_status',
+  failureNotifiedAt: 'failure_notified_at',
 };
 
 async function update(id, patch) {

@@ -4,7 +4,12 @@
 process.env.NODE_ENV = 'test';
 const { db, reset } = require('./perf/lib');
 const deviceTokenStore = require('./store/deviceTokenStore');
+// Makbuz işi Redis'e GERÇEKTEN eklenmesin (geliştirme Redis'inde gecikmeli iş kalmasın): kuyruk sahte.
+const queues = require('./queue/scrapeQueue');
+const receiptJobs = [];
+queues.receiptQueue.add = async (name, data, opts) => { receiptJobs.push({ name, data, opts }); };
 const { sendExpoPush } = require('./notifications/expoPush');
+const { processReceipts } = require('./notifications/receipts');
 
 let ok = true;
 function check(label, actual, expected) {
@@ -33,7 +38,8 @@ const tok = (n) => `ExponentPushToken[${String(n).padStart(6, '0')}]`;
   let r = await sendExpoPush([tok(1), tok(2)], payload);
   check('2 bilet kabul', [r.sent, r.failed, r.removed], [2, 0, 0]);
   check('mesaj biçimi: kanal + ses + veri', [requests[0][0].channelId, requests[0][0].sound, requests[0][0].data], ['default', 'default', { x: 1 }]);
-  check('makbuz kimlikleri dönüyor (check-push için)', r.tickets, ['t0', 't1']);
+  check('bilet kimlikleri jetonlarıyla dönüyor', r.tickets, [{ id: 't0', token: tok(1) }, { id: 't1', token: tok(2) }]);
+  check('teslimat makbuzu kontrolü ~15 dk GECİKMELİ kuyruğa eklendi', [receiptJobs.length, receiptJobs[0].name, receiptJobs[0].opts.delay, receiptJobs[0].data.entries.length], [1, 'check-receipts', 15 * 60 * 1000, 2]);
 
   console.log('\n--- 2) geçersiz jetonlar hiç gönderilmez');
   requests.length = 0;
@@ -81,6 +87,55 @@ const tok = (n) => `ExponentPushToken[${String(n).padStart(6, '0')}]`;
   r = await sendExpoPush(Array.from({ length: 250 }, (_, i) => tok(100 + i)), payload);
   check('3 istek: 100+100+50', requests.map((b) => b.length), [100, 100, 50]);
   check('hepsi kabul', r.sent, 250);
+
+  console.log('\n--- 7) makbuz kuyruğu: biletsiz gönderimde iş eklenmez; kuyruk hatası gönderimi bozmaz');
+  receiptJobs.length = 0;
+  handler = () => ({ body: { data: [{ status: 'error', message: 'x', details: { error: 'MessageRateExceeded' } }] } });
+  await sendExpoPush([tok(1)], payload);
+  check('kabul edilen bilet yok -> makbuz işi yok', receiptJobs.length, 0);
+  handler = (batch) => ({ body: { data: batch.map((_, i) => ({ status: 'ok', id: `q${i}` })) } });
+  queues.receiptQueue.add = async () => { throw new Error('redis kapalı'); };
+  r = await sendExpoPush([tok(1)], payload);
+  check('kuyruk hatası -> gönderim yine başarılı', [r.sent, r.failed], [1, 0]);
+
+  console.log('\n--- 8) teslimat makbuzları (receipts.js)');
+  await deviceTokenStore.upsert({ userId: 'u9', expoPushToken: tok(90), platform: 'android' });
+  await deviceTokenStore.upsert({ userId: 'u9', expoPushToken: tok(91), platform: 'ios' });
+  const entries = [
+    { id: 'r-ok', token: tok(91) },
+    { id: 'r-gone', token: tok(90) },
+    { id: 'r-cred', token: tok(92) },
+    { id: 'r-late', token: tok(93) },
+  ];
+  const receiptRequests = [];
+  handler = (body) => {
+    receiptRequests.push(body);
+    return {
+      body: {
+        data: {
+          'r-ok': { status: 'ok' },
+          'r-gone': { status: 'error', message: 'gone', details: { error: 'DeviceNotRegistered' } },
+          'r-cred': { status: 'error', message: 'FCM credentials', details: { error: 'InvalidCredentials' } },
+          // 'r-late' henüz hazır değil: yanıtta yok
+        },
+      },
+    };
+  };
+  const rec = await processReceipts(entries);
+  check('1 ok, 2 hata (kayıtsız cihaz + kimlik bilgisi), 1 henüz hazır değil', [rec.ok, rec.failed, rec.pending.map((e) => e.id)], [1, 2, ['r-late']]);
+  check('yalnızca DeviceNotRegistered jetonu silinir (kimlik bilgisi hatası jetonu SİLMEZ)', [rec.removed, (await deviceTokenStore.listByUser('u9')).map((t) => t.expoPushToken)], [1, [tok(91)]]);
+  check('makbuz isteği kimlikleri tek istekte gönderir', receiptRequests[0].ids, ['r-ok', 'r-gone', 'r-cred', 'r-late']);
+
+  handler = () => ({ status: 500, body: {} });
+  const down = await processReceipts([{ id: 'a', token: tok(1) }]);
+  check('Expo hatası -> hepsi bekleyen (yeniden denenir), istisna yok', [down.ok, down.failed, down.pending.length], [0, 0, 1]);
+  handler = () => { throw new TypeError('network'); };
+  check('ağ hatası -> bekleyen, istisna yok', (await processReceipts([{ id: 'a', token: tok(1) }])).pending.length, 1);
+
+  requests.length = 0;
+  handler = (body) => ({ body: { data: Object.fromEntries(body.ids.map((id) => [id, { status: 'ok' }])) } });
+  const many = await processReceipts(Array.from({ length: 650 }, (_, i) => ({ id: `m${i}`, token: tok(i) })));
+  check('650 makbuz 300\'lük gruplara bölünür, hepsi ok', [requests.map((b) => b.ids.length), many.ok], [[300, 300, 50], 650]);
 
   global.fetch = realFetch;
   console.log(`\n${ok ? '✔ Tüm testler geçti' : '✘ Bazı testler başarısız'}`);
