@@ -1,3 +1,7 @@
+// Hata izleme (SENTRY_DSN yoksa no-op): diğer modüllerden ÖNCE başlatılır.
+const { initSentry, captureError, flush: flushSentry } = require('./monitoring/sentry');
+initSentry('api');
+
 const express = require('express');
 const cors = require('cors');
 const logger = require('./logger');
@@ -6,6 +10,9 @@ const productsRouter = require('./routes/products');
 const devicesRouter = require('./routes/devices');
 const usersRouter = require('./routes/users');
 const webhooksRouter = require('./routes/webhooks');
+const authRouter = require('./routes/auth');
+const { requireAuth, matchUser } = require('./middleware/auth');
+const { assertConfigured: assertAuthConfigured } = require('./auth/token');
 const { BRANDS } = require('./scraper/registry');
 const { startWorker } = require('./worker');
 const { closeBrowser, prewarmBrowser } = require('./scraper/browserFetch');
@@ -13,13 +20,18 @@ const { WORKER_TICK_MS } = require('./constants');
 const db = require('./store/db');
 const { retentionQueue } = require('./queue/scrapeQueue');
 const { productsLimiter, generalLimiter } = require('./middleware/rateLimit');
-const { isDevMode } = require('./config');
+const { isDevMode, assertProductionConfig, applyTrustProxy, corsOptions } = require('./config');
 
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // günde bir kez yeter
 
 const app = express();
 app.disable('x-powered-by'); // sunucu yığınını ilan etmeye gerek yok
-app.use(cors());
+// Ters vekil arkasında doğru istemci IP'si (hız sınırı + log) için: TRUST_PROXY=<vekil sayısı>.
+// Geçersiz değer burada fırlatır ve süreç açılmaz.
+applyTrustProxy(app);
+// CORS: geliştirmede açık, canlıda varsayılan KAPALI (bkz. config.js corsOptions, CORS_ORIGINS).
+const corsConfig = corsOptions();
+if (corsConfig) app.use(cors(corsConfig));
 // Kimlik başlıkları ve userId maskeli loglanır (bkz. middleware/requestLog.js).
 app.use(createRequestLogger(logger));
 // Büyük gövde (5MB) yalnızca istemcinin kendi HTML'ini gönderebildiği geliştirme
@@ -35,9 +47,14 @@ app.get('/api/health', (_req, res) => {
 // products router özellikle scraping'i tetikleyen (resolve/create) uçları
 // içeriyor — genel sınırın üzerine daha sıkı bir ek sınır (bkz.
 // middleware/rateLimit.js).
-app.use('/api/products', productsLimiter, productsRouter);
-app.use('/api/devices', devicesRouter);
-app.use('/api/users', usersRouter);
+// Kimlik: yalnızca /api/auth/register (token üretir), /api/health ve RevenueCat
+// webhook'u (kendi secret'ıyla) açık; geri kalan HER /api ucu geçerli bir
+// `Authorization: Bearer` token'ı ister ve gövde/sorgu/yoldaki userId'nin
+// token'daki kimlikle aynı olmasını şart koşar (bkz. middleware/auth.js).
+app.use('/api/auth', authRouter);
+app.use('/api/products', requireAuth, matchUser, productsLimiter, productsRouter);
+app.use('/api/devices', requireAuth, matchUser, devicesRouter);
+app.use('/api/users', requireAuth, matchUser, usersRouter);
 app.use('/webhooks', webhooksRouter);
 
 // Merkezi hata middleware'i — TÜM route'lardan SONRA eklenmeli (Express,
@@ -58,6 +75,7 @@ app.use((err, req, res, next) => {
   // (400) — geri kalan her şey sunucu tarafı kabul edilip 500'e genelleniyor.
   const isBadRequest = err.type === 'entity.parse.failed' || err.status === 400;
   const status = isBadRequest ? 400 : 500;
+  if (!isBadRequest) captureError(err, { route: req.route?.path, method: req.method });
   const body = isBadRequest
     ? { error: 'INVALID_REQUEST', message: 'İstek gövdesi okunamadı.' }
     : { error: 'INTERNAL_ERROR', message: 'Sunucuda beklenmeyen bir hata oluştu, lütfen daha sonra tekrar deneyin.' };
@@ -70,6 +88,9 @@ if (require.main === module) {
   (async () => {
     // Şema idempotent (CREATE TABLE IF NOT EXISTS) — her açılışta çalıştırmak
     // güvenli, ayrı bir migration adımı gerektirmiyor (bkz. store/db.js).
+    // Canlıda AUTH_SECRET yoksa/kısaysa burada patlar (fail-closed).
+    assertAuthConfigured();
+    assertProductionConfig();
     await db.migrate();
 
     // Geliştirme kolaylıkları (kimliksiz /users/:id/premium ucu, fixture yedeği,
@@ -107,11 +128,21 @@ if (require.main === module) {
     // job'u tekilleştirir, her sunucu yeniden başlatmasında yeniden
     // eklemek zararsız (yinelenmiyor).
     await retentionQueue.add('prune-price-history', {}, { repeat: { every: RETENTION_INTERVAL_MS } });
-  })();
+    // Marka bazlı tarama sağlığı raporu (sağlıksız marka -> ERROR logu, bkz. monitoring/brandHealth.js).
+    await retentionQueue.add('brand-health', {}, { repeat: { every: 30 * 60 * 1000 } });
+  })().catch((err) => {
+    // Açılış hatası (ör. AUTH_SECRET eksik, DB/Redis erişilemiyor) ölümcül: aşağıdaki
+    // unhandledRejection işleyicisi süreci AYAKTA tutar, bu da dinlemeyen bir "zombi"
+    // sunucu bırakırdı (konteyner çalışıyor görünür ama hiçbir şey yanıtlamaz).
+    logger.fatal({ err: err instanceof Error ? err.message : String(err) }, '[server] açılış başarısız, süreç kapanıyor');
+    captureError(err, { phase: 'startup' });
+    flushSentry().finally(() => process.exit(1));
+  });
 
   // Chromium arka planda açık kalmasın diye process kapanırken temizle.
   const shutdown = async () => {
     await closeBrowser();
+    await flushSentry();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
@@ -128,6 +159,7 @@ if (require.main === module) {
       { err: reason instanceof Error ? reason.message : String(reason) },
       '[server] yakalanmamış promise reddi — süreç ayakta tutuluyor'
     );
+    captureError(reason);
   });
 }
 

@@ -55,13 +55,27 @@ const post = (base, p, body, headers = {}) =>
   logApp.use(createRequestLogger(pino({ ...loggerOptions, level: 'info' }, sink)));
   logApp.get('/api/products', (_req, res) => res.json([]));
   logApp.get('/api/users/:userId/limits', (_req, res) => res.json({}));
+  logApp.get('/api/health', (_req, res) => res.json({ ok: true }));
+  logApp.get('/api/boom', (_req, res) => res.status(500).json({}));
+  logApp.get('/api/nope', (_req, res) => res.status(404).json({}));
   const logSrv = await serve(logApp);
   const USER = 'f8447412-8155-46c1-b04f-2e0a77aa82ea';
   await fetch(`${logSrv.base}/api/products?userId=${USER}`, { headers: { Authorization: 'Bearer SIR-DEGER-12345', Cookie: 'session=GIZLI-COOKIE' } });
   await fetch(`${logSrv.base}/api/users/${USER}/limits`);
+  await fetch(`${logSrv.base}/api/health`);
+  await fetch(`${logSrv.base}/api/health?probe=1`);
+  await fetch(`${logSrv.base}/api/boom`);
+  await fetch(`${logSrv.base}/api/nope`);
   await new Promise((r) => setTimeout(r, 200));
   logSrv.close();
-  check('sağlık: 2 istek logu yazıldı (aksi halde aşağıdaki "YOK" kontrolleri anlamsız)', out.split('\n').filter((l) => l.includes('request completed')).length, 2);
+  // 5xx, pino-http'te "request completed" değil "request errored" (hata yığınıyla) olarak yazılır.
+  const logLines = out.split('\n').filter((l) => l.includes('"res"')).map((l) => JSON.parse(l));
+  check('sağlık: 4 istek logu yazıldı (2 normal + 500 + 404; aksi halde aşağıdaki "YOK" kontrolleri anlamsız)', logLines.length, 4);
+  check('/api/health (sorgu dizgesiyle de) loglanmıyor', out.includes('/api/health'), false);
+  check('seviyeler: 404 -> warn(40), 500 -> error(50), 200 -> info(30)', logLines.map((l) => [l.res.statusCode, l.level]), [[200, 30], [200, 30], [500, 50], [404, 40]]);
+  check('yanıt başlıkları loglanmıyor (yalnızca statusCode)', Object.keys(logLines[0].res), ['statusCode']);
+  check('istek başlıkları dökülmüyor (yalnızca user-agent alanı)', [logLines[0].req.headers, typeof logLines[0].req.userAgent], [undefined, 'string']);
+  check('istemci IP\'si loglanıyor', typeof logLines[0].req.ip, 'string');
   check('Authorization değeri log\'da YOK', out.includes('SIR-DEGER-12345'), false);
   check('Cookie değeri log\'da YOK', out.includes('GIZLI-COOKIE'), false);
   check('tam userId log\'da YOK', out.includes(USER), false);
@@ -135,6 +149,8 @@ const post = (base, p, body, headers = {}) =>
   console.log('\n--- 5) dev-premium ucu: yalnızca NODE_ENV=development|test iken açık (fail-closed)');
   const uapp = express();
   uapp.use(express.json());
+  // Kimlik katmanı bu bölümün konusu değil (bkz. test-auth.js); yoldaki id'yi oturum sahibi say.
+  uapp.use('/api/users/:userId', (req, _res, next) => { req.userId = req.params.userId; next(); });
   uapp.use('/api/users', require('./routes/users'));
   const usr = await serve(uapp);
   const savedNode = process.env.NODE_ENV;

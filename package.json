@@ -17,13 +17,14 @@
     "test:stradivarius": "node test-stradivarius.js",
     "test:oysho": "node test-oysho.js",
     "test:all": "node test-zara.js && node test-hm.js && node test-pullandbear.js && node test-bershka.js && node test-mango.js && node test-massimodutti.js && node test-stradivarius.js && node test-oysho.js",
-    "test:unit": "node test-mango.js && node test-domain-limiter.js && node test-claim-attempt.js && node test-check-schedule.js && node test-batching.js && node test-security.js",
+    "test:unit": "node test-mango.js && node test-domain-limiter.js && node test-claim-attempt.js && node test-check-schedule.js && node test-batching.js && node test-security.js && node test-auth.js && node test-push.js && node test-notifications.js && node test-health.js && node test-sentry.js && node test-ratelimit.js && node test-migrations.js",
     "perf:tick": "node perf/bench-tick.js",
     "perf:history": "node perf/bench-history.js",
     "perf:api": "node perf/bench-api.js",
     "perf:worker": "node perf/bench-worker.js"
   },
   "dependencies": {
+    "@sentry/node": "^11.10.0",
     "bullmq": "^6.1.2",
     "cheerio": "^1.0.0",
     "cors": "^2.8.5",
@@ -36,6 +37,7 @@
     "pino-http": "^11.0.0",
     "playwright": "^1.62.1",
     "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "rate-limit-redis": "^6.0.2"
   }
 }

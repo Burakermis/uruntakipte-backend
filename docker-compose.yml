@@ -1,6 +1,11 @@
+name: uruntakipte
+
 services:
   redis:
     image: redis:7-alpine
+    # BullMQ için: kuyruk Redis'te yaşar. noeviction -> bellek dolarsa rastgele anahtar silmek yerine yazma hatası
+    # verir (sessiz veri kaybı olmaz); appendonly -> yeniden başlatmada kuyruk işleri kaybolmaz.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     ports:
       # Yalnızca yerel makine: "6379:6379" Redis'i (şifresiz) ağdaki herkese açıyordu.
       - "127.0.0.1:6379:6379"
@@ -11,13 +16,56 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: trackprice
-      POSTGRES_PASSWORD: trackprice
+      # Yalnızca VOLÜM İLK OLUŞTURULURKEN etkilidir; sonradan değiştirmek parolayı değiştirmez.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trackprice}
       POSTGRES_DB: trackprice
     ports:
       # Yalnızca yerel makine: aksi halde varsayılan parolalı (trackprice) Postgres ağa açık kalıyordu.
       - "127.0.0.1:5433:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+
+  # --- Uygulama (API + worker) ---------------------------------------------------
+  # Yalnızca `docker compose --env-file .env.production --profile app up -d --build` ile başlar; yerel geliştirmede
+  # (`docker compose up -d`) sadece Postgres ve Redis açılır, API/worker Node ile elle çalışır.
+  # Tek makinede (VPS) dağıtım için ortam değişkenlerini `.env.production` dosyasına yaz
+  # (bkz. .env.example; AUTH_SECRET ve POSTGRES_PASSWORD ZORUNLU; dosya git'e girmez).
+  api:
+    profiles: [app]
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://trackprice:${POSTGRES_PASSWORD:-trackprice}@postgres:5432/trackprice
+      REDIS_HOST: redis
+      # Önünde tek bir ters vekil (Caddy/nginx) var: rate limit ve loglar gerçek istemci IP'sini görsün.
+      # Vekilsiz doğrudan internete açarsan 0 yap (yoksa istemci IP'sini uydurabilir).
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+    ports:
+      # Ters vekil (Caddy/nginx) 4000'e bağlanır; doğrudan internete açma.
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      - postgres
+      - redis
+
+  worker:
+    profiles: [app]
+    build: .
+    init: true
+    restart: unless-stopped
+    command: ["node", "queue/worker-process.js"]
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://trackprice:${POSTGRES_PASSWORD:-trackprice}@postgres:5432/trackprice
+      REDIS_HOST: redis
+    healthcheck:
+      disable: true # imajdaki HTTP kontrolü yalnızca API içindir
+    depends_on:
+      - postgres
+      - redis
 
 volumes:
   redis-data:

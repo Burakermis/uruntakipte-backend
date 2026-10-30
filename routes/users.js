@@ -1,14 +1,19 @@
 const express = require('express');
 const userStore = require('../store/userStore');
 const subscriptionStore = require('../store/subscriptionStore');
-const { limitsForTier } = require('../constants');
+const { limitsForTier, NOTIFICATION_RETENTION_DAYS } = require('../constants');
 const logger = require('../logger');
 const { isDevMode } = require('../config');
 const { maskId } = require('../middleware/requestLog');
-const { hasActiveEntitlement } = require('../billing/revenuecat');
+const { hasActiveEntitlement, deleteSubscriber } = require('../billing/revenuecat');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { matchUserParam } = require('../middleware/auth');
+const notificationStore = require('../store/notificationStore');
 
 const router = express.Router();
+
+// Yoldaki :userId her zaman token'daki kimlikle aynı olmalı (başkasının planını okuyamaz/değiştiremez).
+router.param('userId', matchUserParam);
 
 const REVENUECAT_API_BASE = 'https://api.revenuecat.com/v1';
 
@@ -111,6 +116,38 @@ router.post('/:userId/sync-premium', asyncHandler(async (req, res) => {
 
   const record = await userStore.setPremium(userId, isPremium);
   return res.json({ userId: record.userId, isPremium: record.isPremium });
+}));
+
+// GET /api/users/:userId/notifications?limit=50
+// Bildirim geçmişi (en yeniden eskiye). Kayıtlar kısa ömürlüdür: NOTIFICATION_RETENTION_DAYS gün sonra
+// otomatik silinir (bkz. store/notificationStore.js) — yanıttaki retentionDays mobil ekranda gösterilir.
+router.get('/:userId/notifications', asyncHandler(async (req, res) => {
+  const items = await notificationStore.listByUser(req.params.userId, req.query.limit);
+  return res.json({ items, retentionDays: NOTIFICATION_RETENTION_DAYS });
+}));
+
+// DELETE /api/users/:userId/notifications — kullanıcı geçmişini kendisi temizler (idempotent).
+router.delete('/:userId/notifications', asyncHandler(async (req, res) => {
+  await notificationStore.removeByUser(req.params.userId);
+  return res.status(204).send();
+}));
+
+// DELETE /api/users/:userId
+// Uygulama içi hesap silme (App Store 5.1.1(v) / Google Play hesap silme politikası): kullanıcının
+// bildirim jetonları, tüm takipleri ve kayıt satırı silinir; kimliği "silindi" olarak işaretlenir
+// (bkz. store/userStore.js deleteAccount) — bu yüzden eldeki oturum anahtarı artık 401 döner ve uygulama
+// yeni bir kimlikle sıfırdan başlar. RevenueCat müşteri kaydı da en iyi çabayla silinir.
+// Mağazadaki ABONELİK iptal edilmez (bunu yalnızca Apple/Google yapabilir); mobil arayüz kullanıcıyı
+// bu konuda uyarır.
+router.delete('/:userId', asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const removed = await userStore.deleteAccount(userId);
+  const revenueCat = await deleteSubscriber(userId);
+  logger.info(
+    { userId: maskId(userId), ...removed, revenueCat: revenueCat.ok ? 'deleted' : revenueCat.reason },
+    '[users] hesap silindi'
+  );
+  return res.status(204).send();
 }));
 
 module.exports = router;

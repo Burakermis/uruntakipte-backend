@@ -89,3 +89,31 @@ CREATE TABLE IF NOT EXISTS users (
   is_premium BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Silinen hesapların kimlikleri (rastgele UUID; kişisel veri DEĞİL). İmzalı oturum anahtarları tek tek
+-- iptal edilemediği için, silinen bir hesabın anahtarı geçerli kalıp hesabı geri doğurmasın diye bu
+-- kimlikler reddedilir (bkz. middleware/auth.js, routes/webhooks.js).
+CREATE TABLE IF NOT EXISTS deleted_users (
+  user_id TEXT PRIMARY KEY,
+  deleted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Bildirim geçmişi (kısa ömürlü: günlük işle NOTIFICATION_RETENTION_DAYS gün sonra silinir, kullanıcı başına
+-- en fazla NOTIFICATION_MAX_PER_USER kayıt; bkz. store/notificationStore.js). Hesap silinince de silinir.
+CREATE TABLE IF NOT EXISTS notifications (
+  id SERIAL PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  product_url TEXT,
+  product_name TEXT,
+  image_url TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications (created_at);
+
+-- Kalıcı tarama hatasında kullanıcılar bir kez uyarılır (bkz. checker.js FAILURE_NOTIFY_THRESHOLD); başarılı
+-- taramada sıfırlanır ki ürün düzelip yeniden bozulursa tekrar uyarılabilsin.
+ALTER TABLE tracked_targets ADD COLUMN IF NOT EXISTS failure_notified_at TIMESTAMPTZ;

@@ -1,9 +1,13 @@
 const { Queue, QueueEvents } = require('bullmq');
 const { SCRAPE_JOB_TIMEOUT_MS } = require('../constants');
 
+// Yönetilen Redis (Upstash, Redis Cloud, Elasticache...) genellikle parola ve TLS ister:
+// REDIS_PASSWORD verilirse kullanılır, REDIS_TLS=1 ise bağlantı TLS ile kurulur.
 const connection = {
   host: process.env.REDIS_HOST || 'localhost',
   port: Number(process.env.REDIS_PORT || 6379),
+  ...(process.env.REDIS_PASSWORD ? { password: process.env.REDIS_PASSWORD } : {}),
+  ...(process.env.REDIS_TLS === '1' ? { tls: {} } : {}),
 };
 
 // BullMQ tamamlanan/başarısız job kayıtlarını VARSAYILAN OLARAK SONSUZA KADAR
@@ -60,4 +64,17 @@ const retentionQueue = new Queue('retention', {
   defaultJobOptions: { removeOnComplete: { age: 7 * 24 * 60 * 60, count: 30 }, removeOnFail: RETENTION.failed },
 });
 
-module.exports = { connection, scrapeQueue, scrapeQueueEvents, checkQueue, retentionQueue };
+// "push-receipts" — gönderilen push biletlerinin gecikmeli teslimat makbuzu kontrolü (bkz.
+// notifications/receipts.js). Makbuz ~15 dk sonra hazır olur; hazır değilse iş yeniden denenir.
+const RECEIPT_DELAY_MS = 15 * 60 * 1000;
+const receiptQueue = new Queue('push-receipts', {
+  connection,
+  defaultJobOptions: {
+    removeOnComplete: { age: 60 * 60, count: 100 },
+    removeOnFail: RETENTION.failed,
+    attempts: 3,
+    backoff: { type: 'fixed', delay: 10 * 60 * 1000 },
+  },
+});
+
+module.exports = { connection, scrapeQueue, scrapeQueueEvents, checkQueue, retentionQueue, receiptQueue, RECEIPT_DELAY_MS };

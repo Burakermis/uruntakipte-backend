@@ -1,0 +1,16 @@
+node_modules
+.git
+.github
+.idea
+.env
+*.log
+# Yerel geliştirme verisi ve testler imaja girmez
+data
+fixtures
+perf
+test-*.js
+Dockerfile
+docker-compose*.yml
+.dockerignore
+README.md
+backups

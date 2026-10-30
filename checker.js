@@ -4,8 +4,34 @@ const trackedTargetStore = require('./store/trackedTargetStore');
 const subscriptionStore = require('./store/subscriptionStore');
 const priceHistoryStore = require('./store/priceHistoryStore');
 const deviceTokenStore = require('./store/deviceTokenStore');
+const notificationStore = require('./store/notificationStore');
+const logger = require('./logger');
 const { sendExpoPush } = require('./notifications/expoPush');
-const { NOT_CURRENTLY_PURCHASABLE } = require('./constants');
+const { NOT_CURRENTLY_PURCHASABLE, FAILURE_NOTIFY_THRESHOLD } = require('./constants');
+
+// Başarısız taramayı kaydeder; ardışık hata eşiğe (FAILURE_NOTIFY_THRESHOLD) ilk kez ulaşınca bu ürünü takip
+// eden her kullanıcıya BİR KEZ "takip edilemiyor" bildirimi gönderir (ürün kaldırılmış / sayfa değişmiş / engellenmiş
+// olabilir). Bildirim hatası taramayı etkilemez.
+async function recordFailure(target, status) {
+  const failures = target.consecutiveFailures + 1;
+  const patch = { consecutiveFailures: failures, lastCheckStatus: status, lastAttemptAt: new Date().toISOString() };
+  const shouldNotify = failures >= FAILURE_NOTIFY_THRESHOLD && !target.failureNotifiedAt;
+  if (shouldNotify) patch.failureNotifiedAt = new Date().toISOString();
+  await trackedTargetStore.update(target.id, patch);
+  if (!shouldNotify) return;
+  try {
+    const subscriptions = await subscriptionStore.listByTarget(target.id);
+    for (const sub of subscriptions) {
+      await sendNotificationForEvent(sub, target, null, { type: 'tracking_failed' });
+    }
+    logger.warn(
+      { targetId: target.id, brand: target.brand, status, users: subscriptions.length },
+      '[checker] hedef kalıcı olarak taranamıyor, aboneler uyarıldı'
+    );
+  } catch (err) {
+    logger.warn({ err: err.message, targetId: target.id }, '[checker] "takip edilemiyor" bildirimi gönderilemedi');
+  }
+}
 
 /**
  * Tek bir HEDEFİ yeniden tarar: sayfayı BİR KEZ çeker, tüm varyantları
@@ -20,31 +46,19 @@ const { NOT_CURRENTLY_PURCHASABLE } = require('./constants');
 async function checkTrackedTarget(target) {
   const brand = detectBrand(target.url);
   if (!brand) {
-    await trackedTargetStore.update(target.id, {
-      consecutiveFailures: target.consecutiveFailures + 1,
-      lastCheckStatus: 'UNSUPPORTED',
-      lastAttemptAt: new Date().toISOString(),
-    });
+    await recordFailure(target, 'UNSUPPORTED');
     return { id: target.id, ok: false, reason: 'UNSUPPORTED' };
   }
 
   const fetched = await fetchHtml(target.url, { brandId: brand.id });
   if (!fetched) {
-    await trackedTargetStore.update(target.id, {
-      consecutiveFailures: target.consecutiveFailures + 1,
-      lastCheckStatus: 'FETCH_FAILED',
-      lastAttemptAt: new Date().toISOString(),
-    });
+    await recordFailure(target, 'FETCH_FAILED');
     return { id: target.id, ok: false, reason: 'FETCH_FAILED' };
   }
 
   const resolved = resolveProductFromHtml({ url: target.url, html: fetched.html });
   if (resolved.error) {
-    await trackedTargetStore.update(target.id, {
-      consecutiveFailures: target.consecutiveFailures + 1,
-      lastCheckStatus: resolved.error,
-      lastAttemptAt: new Date().toISOString(),
-    });
+    await recordFailure(target, resolved.error);
     return { id: target.id, ok: false, reason: resolved.error };
   }
 
@@ -57,6 +71,7 @@ async function checkTrackedTarget(target) {
     lastAttemptAt: new Date().toISOString(),
     lastCheckStatus: 'ok',
     consecutiveFailures: 0,
+    failureNotifiedAt: null, // düzeldi: yeniden bozulursa tekrar uyarılabilir
   });
 
   // Fiyat geçmişi HEDEF bazında (kullanıcı sayısından bağımsız) ve SADECE
@@ -123,15 +138,37 @@ async function checkTrackedTarget(target) {
 }
 
 async function sendNotificationForEvent(subscription, target, variant, event) {
+  let title;
+  let body;
+  if (event.type === 'tracking_failed') {
+    title = `${target.name || 'Ürün'} takip edilemiyor`;
+    body = 'Mağaza sayfasına bir süredir ulaşamıyoruz. Ürün kaldırılmış ya da sayfa değişmiş olabilir; düzelirse takip kendiliğinden devam eder.';
+  } else if (event.type === 'price_drop') {
+    title = `${target.name} fiyatı düştü`;
+    body = `${event.previousPrice} → ${event.newPrice} ${event.currency ?? ''}`.trim();
+  } else {
+    title = `${target.name} stoğa girdi`;
+    body = `${variant.color} / ${variant.size} tekrar satışta`;
+  }
+
+  // Geçmişe push'tan BAĞIMSIZ yazılır: bildirimler kapalı olsa ya da cihaz kaydı olmasa da kullanıcı
+  // uygulamada ne olduğunu görebilir. Geçmiş yazılamazsa bildirim gönderimi engellenmez.
+  try {
+    await notificationStore.add({
+      userId: subscription.userId,
+      type: event.type,
+      title,
+      body,
+      productUrl: target.canonicalUrl,
+      productName: target.name,
+      imageUrl: target.imageUrl,
+    });
+  } catch (err) {
+    logger.warn({ err: err.message }, '[checker] bildirim geçmişi yazılamadı');
+  }
+
   const tokens = (await deviceTokenStore.listByUser(subscription.userId)).map((t) => t.expoPushToken);
   if (tokens.length === 0) return { sent: 0, reason: 'NO_DEVICE' };
-
-  const title =
-    event.type === 'price_drop' ? `${target.name} fiyatı düştü` : `${target.name} stoğa girdi`;
-  const body =
-    event.type === 'price_drop'
-      ? `${event.previousPrice} → ${event.newPrice} ${event.currency ?? ''}`.trim()
-      : `${variant.color} / ${variant.size} tekrar satışta`;
 
   return sendExpoPush(tokens, {
     title,

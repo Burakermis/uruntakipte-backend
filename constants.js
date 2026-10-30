@@ -55,7 +55,19 @@ const CIRCUIT_BREAKER = {
 // bir kayıt ekleme isteğini hataya düşürür) — bu yüzden tek kaynak burası.
 const SCRAPE_JOB_TIMEOUT_MS = 30000;
 
+// Bildirim geçmişi (bkz. store/notificationStore.js): kayıtlar bu kadar gün sonra otomatik silinir ve kullanıcı
+// başına en fazla bu kadar kayıt tutulur. Mobildeki "Bildirim Geçmişi" ekranı ve gizlilik politikası aynı değerleri söyler.
+const NOTIFICATION_RETENTION_DAYS = Number(process.env.NOTIFICATION_RETENTION_DAYS || 30);
+const NOTIFICATION_MAX_PER_USER = 100;
+
+// Bir hedef art arda bu kadar kez taranamazsa abonelerine BİR KEZ "takip edilemiyor" bildirimi gider (bkz. checker.js).
+// Devre kesicinin geri çekilmesiyle (bkz. CIRCUIT_BREAKER) bu, yaklaşık bir gün sürekli hata demektir.
+const FAILURE_NOTIFY_THRESHOLD = 10;
+
 module.exports = {
+  NOTIFICATION_RETENTION_DAYS,
+  NOTIFICATION_MAX_PER_USER,
+  FAILURE_NOTIFY_THRESHOLD,
   NOT_CURRENTLY_PURCHASABLE,
   TIER_LIMITS,
   limitsForTier,

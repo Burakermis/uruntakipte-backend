@@ -68,3 +68,19 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
 
       - run: npm run test:unit
+
+  # Üretim imajının derlenebildiğini doğrular (yayınlamaz): Dockerfile, Playwright imaj sürümü ile package.json'daki
+  # `playwright` uyuşmazsa ya da bağımlılık kurulumu bozulursa burada yakalanır.
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Playwright sürümü imaj etiketiyle aynı mı?
+        run: |
+          pkg=$(node -p "require('./package-lock.json').packages['node_modules/playwright'].version")
+          grep -q "playwright:v${pkg}-" Dockerfile || { echo "Dockerfile imaj etiketi playwright ${pkg} ile uyuşmuyor"; exit 1; }
+
+      - run: docker build -t uruntakipte-backend .

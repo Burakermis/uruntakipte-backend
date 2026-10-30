@@ -3,3 +3,7 @@ data/
 .env
 !.env.example
 *.log
+.env.production
+
+.idea/
+backups/

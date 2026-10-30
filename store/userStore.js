@@ -46,4 +46,33 @@ async function setPremium(userId, premium) {
   return mapRow(rows[0]);
 }
 
-module.exports = { getOrCreate, isPremium, setPremium };
+// Hesap silindi mi? (bkz. deleteAccount) — kimlik doğrulama her istekte sorar.
+async function isDeleted(userId) {
+  const { rowCount } = await db.query('SELECT 1 FROM deleted_users WHERE user_id = $1', [userId]);
+  return rowCount > 0;
+}
+
+// Kullanıcının TÜM verisini tek işlemde siler: bildirim jetonları, tüm takipler (kaldırılmışlar dahil)
+// ve kullanıcı kaydı; geriye yalnızca kimliğin kendisi (silindi işareti) kalır. Fiyat geçmişi ve takip
+// edilen ürün kayıtları kullanıcıya ait değil (ürün bazında, paylaşımlı) — silinmez.
+// İdempotent: hesap yoksa ya da zaten silinmişse de hata vermez.
+async function deleteAccount(userId) {
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    const tokens = await client.query('DELETE FROM device_tokens WHERE user_id = $1', [userId]);
+    const subs = await client.query('DELETE FROM subscriptions WHERE user_id = $1', [userId]);
+    const notes = await client.query('DELETE FROM notifications WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM users WHERE user_id = $1', [userId]);
+    await client.query('INSERT INTO deleted_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING', [userId]);
+    await client.query('COMMIT');
+    return { deviceTokens: tokens.rowCount, subscriptions: subs.rowCount, notifications: notes.rowCount };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { getOrCreate, isPremium, setPremium, isDeleted, deleteAccount };

@@ -58,6 +58,13 @@ router.post('/revenuecat', asyncHandler(async (req, res) => {
     return res.status(200).json({ ok: true, ignored: 'SANDBOX' });
   }
 
+  // Silinmiş hesap için gelen olaylar (ör. mağazada hâlâ süren abonelik yenilenir) hesabı geri
+  // doğurmasın: kayıt oluşturmadan 200 dön ki RevenueCat yeniden denemesin.
+  if (await userStore.isDeleted(userId)) {
+    logger.info({ userId: maskId(userId), eventType: event.type }, '[webhooks] silinmiş hesap için olay, yok sayıldı');
+    return res.status(200).json({ ok: true, ignored: 'ACCOUNT_DELETED' });
+  }
+
   if (PREMIUM_ACTIVATING_EVENTS.has(event.type)) {
     await userStore.setPremium(userId, true);
   } else if (PREMIUM_DEACTIVATING_EVENTS.has(event.type)) {
