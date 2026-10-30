@@ -36,4 +36,13 @@ async function listByUser(userId) {
   return rows.map(mapRow);
 }
 
-module.exports = { upsert, listByUser };
+// Kullanıcı uygulamada bildirimleri kapattığında: bu kullanıcının tüm token kayıtları silinir,
+// böylece checker.js'in bildirim gönderimi 'NO_DEVICE' ile atlanır. userId cihazda üretilen
+// kimlik olduğundan (bir kurulum = bir userId) "bu cihazın bildirimleri" ile aynı şey.
+// Silinecek kayıt yoksa da hata değil — çağrı idempotent (kapat, tekrar kapat → aynı sonuç).
+async function removeByUser(userId) {
+  const { rowCount } = await db.query('DELETE FROM device_tokens WHERE user_id = $1', [userId]);
+  return rowCount;
+}
+
+module.exports = { upsert, listByUser, removeByUser };
