@@ -50,3 +50,16 @@ Dikkat:
 - `node scripts/brand-health.js`: marka bazlı tarama sağlığı (aktif / ardışık hata veren hedef sayısı, en sık hata). Worker bunu 30 dakikada bir loglar; bir markanın aktif hedeflerinin ≥%50'si (en az 3 hedef) ardışık hata veriyorsa `error` seviyesinde `[health] ... sağlıksız` yazar.
 - Push teslimat makbukları ~15 dk sonra kontrol edilir; FCM/APNs kimlik bilgisi hatası `error` seviyesinde `TESLİMAT HATASI` olarak loglanır.
 - Bir ürün 10 ardışık taramada okunamazsa (yaklaşık bir gün) takipçilerine bir kez "takip edilemiyor" bildirimi gider.
+
+## Veritabanı şeması (migration'lar)
+
+Şema `store/migrations/NNN_ad.sql` dosyalarıyla yönetilir; API açılışta (`db.migrate()`) sırayla ve her biri tek işlemde uygular, `schema_migrations` tablosuna yazar. Aynı anda birden çok süreç açılırsa Postgres kilidi sayesinde tek biri uygular.
+
+- Şema değişikliği = **yeni dosya** (`002_...sql`, `003_...sql`). Uygulanmış bir dosyayı **düzenleme**: içeriği değişirse sağlama toplamı uyuşmaz ve sunucu açılmaz.
+- Başarısız migration geri alınır, kaydedilmez ve sonrakiler çalışmaz; hata dosya adını söyler.
+- `001_baseline.sql` eski `schema.sql`'in birebir halidir (idempotent): mevcut veritabanlarına zarar vermeden uygulanır.
+- Geri alma (down) migration'ı yoktur: riskli değişikliklerden önce `scripts/backup.sh` çalıştırın.
+
+## Hız sınırı
+
+Sayaçlar canlıda (`NODE_ENV=production`) Redis'te tutulur, böylece birden çok API örneği aynı sınırı paylaşır ve yeniden başlatma sayacı sıfırlamaz. Redis erişilemezse istekler engellenmez (sınırlayıcı tek başına kesinti nedeni olmasın). `RATE_LIMIT_STORE=memory|redis` ile zorlanabilir.
