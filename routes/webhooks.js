@@ -4,17 +4,22 @@ const userStore = require('../store/userStore');
 const logger = require('../logger');
 const { isDevMode } = require('../config');
 const { maskId } = require('../middleware/requestLog');
-const { shouldIgnoreEvent } = require('../billing/revenuecat');
+const { shouldIgnoreEvent, fetchPremiumState } = require('../billing/revenuecat');
+const { setPlan } = require('../billing/plan');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
 const router = express.Router();
 
-// RevenueCat, StoreKit/Play Billing'in gerçek satın alma makbuzunu ZATEN
-// doğrulayıp bu webhook'u tetikliyor — burada tekrar bir makbuz doğrulaması
-// YAPMIYORUZ, sadece "hangi deviceId'nin (RevenueCat App User ID = Faz 3'teki
-// deviceId, bkz. mobile/src/purchases.ts) durumu ne oldu" bilgisini
-// userStore.setPremium'a aktarıyoruz — imza (userId -> isPremium) dev-toggle
-// ile birebir aynı kaldığı için routes/users.js'e dokunmaya gerek kalmadı.
+// RevenueCat, StoreKit/Play Billing'in gerçek satın alma makbuzunu ZATEN doğrulayıp bu webhook'u tetikliyor — burada
+// tekrar bir makbuz doğrulaması YAPMIYORUZ, sadece "hangi kullanıcının (RevenueCat App User ID = userId, bkz.
+// mobile/src/purchases.ts) durumu ne oldu" bilgisini billing/plan.js'e aktarıyoruz.
+//
+// Olay türüne göre iki yol:
+//  - Aktifleştirenler (satın alma, yenileme...): doğrudan premium. Hızlı ve dış çağrı gerektirmez.
+//  - Durumu TÜM yetkilere bağlı olanlar (EXPIRATION, CANCELLATION, TRANSFER): olay tek başına yetmez — kullanıcının
+//    başka bir aktif yetkisi olabilir, iade/aktarım olayın kendisinden anlaşılmaz. RevenueCat'e sorup gerçek duruma
+//    bakıyoruz; sorgu mümkün değilse (anahtar yok/kesinti) güvenli varsayıma düşülür (aşağıda).
+// Her olay, zamanı daha eski olan bir durumu ezmez (geç gelen yeniden denemeler, sıra karışması).
 const PREMIUM_ACTIVATING_EVENTS = new Set([
   'INITIAL_PURCHASE',
   'RENEWAL',
@@ -22,7 +27,9 @@ const PREMIUM_ACTIVATING_EVENTS = new Set([
   'PRODUCT_CHANGE',
   'NON_RENEWING_PURCHASE',
 ]);
-const PREMIUM_DEACTIVATING_EVENTS = new Set(['EXPIRATION']);
+
+// Misafir (kayıtsız) RevenueCat kimlikleri bizim kullanıcılarımız değil: satır açmayız.
+const ANONYMOUS_ID = /^\$RCAnonymousID:/i;
 
 function isAuthorized(req) {
   const expected = process.env.REVENUECAT_WEBHOOK_SECRET;
@@ -39,6 +46,19 @@ function isAuthorized(req) {
   return provided.length === wanted.length && crypto.timingSafeEqual(provided, wanted);
 }
 
+// RevenueCat'e sorarak uygula; sorgulanamazsa `fallback` (true/false) ya da null (hiçbir şey yapma).
+async function applyFromRevenueCat(userId, { fallback, eventAtMs, eventType }) {
+  const state = await fetchPremiumState(userId);
+  if (state.ok) return setPlan(userId, state.isPremium, { eventAtMs });
+  if (fallback === null) {
+    logger.warn({ userId: maskId(userId), eventType, reason: state.reason }, '[webhooks] RevenueCat sorgulanamadı, olay atlandı (uzlaştırma düzeltir)');
+    return null;
+  }
+  return setPlan(userId, fallback, { eventAtMs });
+}
+
+const realIds = (list) => (Array.isArray(list) ? list : []).filter((id) => typeof id === 'string' && id && !ANONYMOUS_ID.test(id));
+
 // POST /webhooks/revenuecat
 router.post('/revenuecat', asyncHandler(async (req, res) => {
   if (!isAuthorized(req)) {
@@ -46,32 +66,58 @@ router.post('/revenuecat', asyncHandler(async (req, res) => {
   }
 
   const event = req.body?.event;
-  const userId = event?.app_user_id;
-  if (!userId || !event?.type) {
-    return res.status(400).json({ error: 'INVALID_REQUEST', message: 'event.app_user_id ve event.type zorunlu.' });
+  if (!event?.type) {
+    return res.status(400).json({ error: 'INVALID_REQUEST', message: 'event.type zorunlu.' });
   }
 
   // Sandbox (TestFlight/iç test) olayları canlıda premium durumunu ne açar ne
   // kapatır (bkz. billing/revenuecat.js). 200 dönüyoruz ki RevenueCat yeniden denemesin.
   if (shouldIgnoreEvent(event)) {
-    logger.info({ userId: maskId(userId), eventType: event.type }, '[webhooks] sandbox olayı canlıda yok sayıldı');
+    logger.info({ userId: maskId(event.app_user_id), eventType: event.type }, '[webhooks] sandbox olayı canlıda yok sayıldı');
     return res.status(200).json({ ok: true, ignored: 'SANDBOX' });
   }
 
-  // Silinmiş hesap için gelen olaylar (ör. mağazada hâlâ süren abonelik yenilenir) hesabı geri
-  // doğurmasın: kayıt oluşturmadan 200 dön ki RevenueCat yeniden denemesin.
-  if (await userStore.isDeleted(userId)) {
+  const eventAtMs = Number(event.event_timestamp_ms) > 0 ? Number(event.event_timestamp_ms) : null;
+  // Silinmiş hesap için gelen olaylar (ör. mağazada hâlâ süren abonelik yenilenir) hesabı geri doğurmasın.
+  const isLive = async (userId) => !(await userStore.isDeleted(userId));
+
+  if (event.type === 'TRANSFER') {
+    // Yetkiler bir kimlikten diğerine taşındı (cihaz değişimi, hesap birleştirme). Eskisinde premium kalırsa iki kimlik
+    // tek abonelikle premium olur. Her iki taraf da gerçek duruma göre yeniden değerlendirilir.
+    const to = realIds(event.transferred_to);
+    const from = realIds(event.transferred_from).filter((id) => !to.includes(id));
+    for (const [ids, fallback] of [[from, false], [to, true]]) {
+      for (const id of ids) {
+        if (await isLive(id)) await applyFromRevenueCat(id, { fallback, eventAtMs, eventType: event.type });
+      }
+    }
+    return res.status(200).json({ ok: true });
+  }
+
+  const userId = event.app_user_id;
+  if (!userId || typeof userId !== 'string') {
+    return res.status(400).json({ error: 'INVALID_REQUEST', message: 'event.app_user_id zorunlu.' });
+  }
+  if (ANONYMOUS_ID.test(userId)) {
+    return res.status(200).json({ ok: true, ignored: 'ANONYMOUS' });
+  }
+  if (!(await isLive(userId))) {
     logger.info({ userId: maskId(userId), eventType: event.type }, '[webhooks] silinmiş hesap için olay, yok sayıldı');
     return res.status(200).json({ ok: true, ignored: 'ACCOUNT_DELETED' });
   }
 
   if (PREMIUM_ACTIVATING_EVENTS.has(event.type)) {
-    await userStore.setPremium(userId, true);
-  } else if (PREMIUM_DEACTIVATING_EVENTS.has(event.type)) {
-    await userStore.setPremium(userId, false);
+    await setPlan(userId, true, { eventAtMs });
+  } else if (event.type === 'EXPIRATION') {
+    // Başka aktif yetkisi varsa premium kalır; sorgulanamazsa süre dolmuştur.
+    await applyFromRevenueCat(userId, { fallback: false, eventAtMs, eventType: event.type });
+  } else if (event.type === 'CANCELLATION') {
+    // Çoğu iptal "yenilenmeyecek" demektir, erişim dönem sonuna kadar sürer; ama iade de bu olayla gelir ve erişim hemen
+    // biter. Ayırt etmenin güvenilir yolu gerçek duruma bakmak. Sorgulanamazsa dokunulmaz (uzlaştırma düzeltir).
+    await applyFromRevenueCat(userId, { fallback: null, eventAtMs, eventType: event.type });
   } else {
-    // CANCELLATION gibi diğer event'ler bilerek yoksayılıyor — kullanıcı
-    // dönem sonuna kadar erişimini KORUR, gerçek kapanış EXPIRATION'da gelir.
+    // BILLING_ISSUE gibi diğer olaylar bilerek yoksayılıyor: ödeme sorununda RevenueCat erişimi ek süreyle korur,
+    // gerçek kapanış EXPIRATION'da gelir.
     logger.info({ userId: maskId(userId), eventType: event.type }, '[webhooks] premium durumunu etkilemeyen event, atlandı');
   }
 

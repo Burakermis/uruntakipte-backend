@@ -15,6 +15,23 @@ function query(text, params) {
   return pool.query(text, params);
 }
 
+// Tek bir bağlantıda BEGIN..COMMIT çalıştırır; fn(tx) içindeki TÜM sorgular tx.query ile aynı bağlantıdan gitmeli
+// (havuzdan ikinci bağlantı almak, havuz doluyken kendi kendini kilitleyebilir). Hata olursa ROLLBACK.
+async function withTransaction(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // Sürümlü migration'lar: store/migrations/NNN_ad.sql dosyaları sırayla, her biri TEK işlemde uygulanır ve
 // schema_migrations tablosuna yazılır; uygulanmış olanlar bir daha çalışmaz. Yeni şema değişikliği = yeni dosya
 // (002_..., 003_...); uygulanmış bir dosya ASLA düzenlenmez (içeriği değişirse sağlama toplamı uyuşmaz ve açılış hata
@@ -65,4 +82,4 @@ async function migrate({ dir = MIGRATIONS_DIR, table = 'schema_migrations' } = {
   }
 }
 
-module.exports = { pool, query, migrate, MIGRATIONS_DIR };
+module.exports = { pool, query, withTransaction, migrate, MIGRATIONS_DIR };

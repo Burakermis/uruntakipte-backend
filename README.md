@@ -60,6 +60,14 @@ Dikkat:
 - `001_baseline.sql` eski `schema.sql`'in birebir halidir (idempotent): mevcut veritabanlarına zarar vermeden uygulanır.
 - Geri alma (down) migration'ı yoktur: riskli değişikliklerden önce `scripts/backup.sh` çalıştırın.
 
+## Premium ve abonelik güvenliği
+
+- **Premium durumunun kaynağı RevenueCat'tir.** Webhook hızlı yoldur; `EXPIRATION`, `CANCELLATION` ve `TRANSFER` olayları tek başına yeterli sayılmaz, RevenueCat'e sorulur. Olaylar zaman damgasıyla sıralanır (geç gelen eski olay yeni durumu ezmez) ve webhook kaçsa bile saatlik `premium-reconcile` işi premium görünen kullanıcıları günde bir kez RevenueCat'e göre doğrular (bkz. `billing/`).
+- **Premium bitince ücretsiz sınır uygulanır:** en eski 3 ürün takipte kalır, fazlası pasifleşir ve kullanıcıya bildirim gider. Bu kapatma "çıkardıktan sonra 48 saat bekle" kuralını tetiklemez.
+- **Ürün ekleme/çıkarma kullanıcı başına kilitlidir** (`subscriptionStore.withUserLock`): eşzamanlı istekler limiti ve bekleme süresini aşamaz, `(kullanıcı, ürün, beden)` tekildir. Limiti dolu kullanıcının görülmemiş bir URL'si sayfa taramasını tetiklemez; tarama uçlarında ve `sync-premium`'da kullanıcı başına hız sınırı vardır.
+- **Canlıda** `REVENUECAT_WEBHOOK_SECRET` ve `REVENUECAT_SECRET_KEY` zorunludur; yoksa API açılmaz. Henüz ücretli plan olmadan yayına çıkılıyorsa `ALLOW_MISSING_BILLING=1` verin.
+- **Bilinen sınır:** kimlik cihazda üretilir; yeniden kurulum ya da hesap silme yeni bir kimlik (ve yeni ücretsiz limit) demektir. Bunu yalnızca cihaz doğrulaması (App Attest / Play Integrity) ya da gerçek hesap sistemi kapatır; kayıt IP başına saatte 20 ile yavaşlatılır.
+
 ## Hız sınırı
 
 Sayaçlar canlıda (`NODE_ENV=production`) Redis'te tutulur, böylece birden çok API örneği aynı sınırı paylaşır ve yeniden başlatma sayacı sıfırlamaz. Redis erişilemezse istekler engellenmez (sınırlayıcı tek başına kesinti nedeni olmasın). `RATE_LIMIT_STORE=memory|redis` ile zorlanabilir.

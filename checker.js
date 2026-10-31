@@ -3,10 +3,8 @@ const { fetchHtml } = require('./scraper/fetchHtml');
 const trackedTargetStore = require('./store/trackedTargetStore');
 const subscriptionStore = require('./store/subscriptionStore');
 const priceHistoryStore = require('./store/priceHistoryStore');
-const deviceTokenStore = require('./store/deviceTokenStore');
-const notificationStore = require('./store/notificationStore');
 const logger = require('./logger');
-const { sendExpoPush } = require('./notifications/expoPush');
+const { notifyUser } = require('./notifications/notifyUser');
 const { NOT_CURRENTLY_PURCHASABLE, FAILURE_NOTIFY_THRESHOLD } = require('./constants');
 const { decideGone } = require('./goneDecision');
 const { captureMessage } = require('./monitoring/sentry');
@@ -215,29 +213,16 @@ async function sendNotificationForEvent(subscription, target, variant, event) {
     body = `${variant.color} / ${variant.size} tekrar satışta`;
   }
 
-  // Geçmişe push'tan BAĞIMSIZ yazılır: bildirimler kapalı olsa ya da cihaz kaydı olmasa da kullanıcı
-  // uygulamada ne olduğunu görebilir. Geçmiş yazılamazsa bildirim gönderimi engellenmez.
-  try {
-    await notificationStore.add({
-      userId: subscription.userId,
-      type: event.type,
-      title,
-      body,
-      productUrl: target.canonicalUrl,
-      productName: target.name,
-      imageUrl: target.imageUrl,
-    });
-  } catch (err) {
-    logger.warn({ err: err.message }, '[checker] bildirim geçmişi yazılamadı');
-  }
-
-  const tokens = (await deviceTokenStore.listByUser(subscription.userId)).map((t) => t.expoPushToken);
-  if (tokens.length === 0) return { sent: 0, reason: 'NO_DEVICE' };
-
-  return sendExpoPush(tokens, {
+  // Geçmişe yazma + cihazlara push tek yerde (bkz. notifications/notifyUser.js).
+  return notifyUser({
+    userId: subscription.userId,
+    type: event.type,
     title,
     body,
-    data: { subscriptionId: subscription.id, type: event.type, url: target.canonicalUrl },
+    productUrl: target.canonicalUrl,
+    productName: target.name,
+    imageUrl: target.imageUrl,
+    data: { subscriptionId: subscription.id },
   });
 }
 

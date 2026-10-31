@@ -78,7 +78,23 @@ const PRODUCT_GONE = {
   brandMinTargets: 5,
 };
 
+// Bir kullanıcı en fazla bu kadar cihaz jetonu tutabilir (en yeniler kalır). Sınırsız olursa sahte jetonlarla her bildirim
+// Expo'ya yüzlerce ek mesaj gönderir ve Expo hesabının itibarını zedeler.
+const MAX_DEVICE_TOKENS_PER_USER = 10;
+
+// Aboneliği olmayan (ürün eklemesi reddedilmiş/yarım kalmış) hedefler bu süreden sonra pasifleştirilir (bkz. retention işi).
+const ORPHAN_TARGET_GRACE_MS = 60 * 60 * 1000;
+
+// Premium uzlaştırma (bkz. billing/reconcile.js): premium görünen kullanıcılar bu kadar eskiyse RevenueCat'e yeniden sorulur.
+const BILLING = {
+  reconcileStaleMs: 24 * 60 * 60 * 1000,
+  reconcileBatch: 200,
+};
+
 module.exports = {
+  MAX_DEVICE_TOKENS_PER_USER,
+  ORPHAN_TARGET_GRACE_MS,
+  BILLING,
   PRODUCT_GONE,
   NOTIFICATION_RETENTION_DAYS,
   NOTIFICATION_MAX_PER_USER,

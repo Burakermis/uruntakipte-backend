@@ -42,6 +42,26 @@ function hasActiveEntitlement(subscriber, now = Date.now()) {
   );
 }
 
+// RevenueCat'in sunucu tarafı REST API'sinden kullanıcının GERÇEK premium durumunu sorar (webhook'un tersi yön). Otorite
+// RevenueCat'tir: webhook olayları gecikebilir, kaçabilir ya da tek başına yetmez (iade, aktarım, birden çok yetki).
+// Sonuç: { ok:true, isPremium } ya da { ok:false, reason } (anahtar yok / ağ / HTTP hatası).
+async function fetchPremiumState(userId) {
+  const secretKey = process.env.REVENUECAT_SECRET_KEY;
+  if (!secretKey) return { ok: false, reason: 'NOT_CONFIGURED' };
+  try {
+    const res = await fetch(`https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(userId)}`, {
+      headers: { Authorization: `Bearer ${secretKey}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status === 404) return { ok: true, isPremium: false }; // RevenueCat bu kullanıcıyı hiç görmemiş
+    if (!res.ok) return { ok: false, reason: `HTTP_${res.status}` };
+    const { subscriber } = await res.json();
+    return { ok: true, isPremium: hasActiveEntitlement(subscriber) };
+  } catch (err) {
+    return { ok: false, reason: err.name === 'TimeoutError' ? 'TIMEOUT' : 'NETWORK' };
+  }
+}
+
 // Hesap silinirken RevenueCat'teki müşteri kaydını da siler (KVKK/GDPR: veri sağlayıcıda kalmasın).
 // En iyi çaba: anahtar yoksa ya da çağrı başarısız olursa hesap silme ENGELLENMEZ (yerel veri zaten
 // silindi); sonuç döner ve çağıran loglar. Mağazadaki abonelik bundan etkilenmez — kullanıcı onu
@@ -63,4 +83,4 @@ async function deleteSubscriber(userId) {
   }
 }
 
-module.exports = { isSandboxEvent, shouldIgnoreEvent, isSandboxEntitlement, hasActiveEntitlement, deleteSubscriber };
+module.exports = { fetchPremiumState, isSandboxEvent, shouldIgnoreEvent, isSandboxEntitlement, hasActiveEntitlement, deleteSubscriber };

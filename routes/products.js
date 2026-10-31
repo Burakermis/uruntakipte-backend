@@ -11,6 +11,7 @@ const htmlCache = require('../store/htmlCache');
 const { scrapeQueue, scrapeQueueEvents } = require('../queue/scrapeQueue');
 const { NOT_CURRENTLY_PURCHASABLE, limitsForTier, SCRAPE_JOB_TIMEOUT_MS } = require('../constants');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { userScrapeLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 
@@ -31,7 +32,7 @@ function clientHtmlAllowed() {
 // POST /api/products/resolve
 // Mobil uygulamanın "Ürün Ekle" ekranını doldurmak için çağırdığı endpoint.
 // Henüz hiçbir şey kaydetmez — sadece URL'i çözüp renk/beden/fiyat/stok döner.
-router.post('/resolve', asyncHandler(async (req, res) => {
+router.post('/resolve', userScrapeLimiter, asyncHandler(async (req, res) => {
   const { url } = req.body || {};
   const html = clientHtmlAllowed() ? (req.body || {}).html : undefined;
 
@@ -93,7 +94,41 @@ router.post('/resolve', asyncHandler(async (req, res) => {
 //      parametreleriyle gelen istekler gereksiz yere ikinci bir hedef
 //      yaratmaz; ham anahtar da mevcut hedefe alias olarak eklenir ki bir
 //      sonraki istek fetch'siz bulsun.
-async function findOrCreateTarget({ url, brand, htmlOverride }) {
+// Yeni bir ürün (slot) eklenebilir mi? Ücretsiz limit ve yeniden-ekleme bekleme süresi; izin yoksa { status, body },
+// varsa null. `q` verilirse sorgular o bağlantıdan gider (kullanıcı kilidi içindeki çağrı: bkz. withUserLock).
+async function checkNewProductAllowed(userId, limits, q) {
+  const activeCount = await subscriptionStore.countActiveByUser(userId, q);
+  if (activeCount >= limits.maxActiveProducts) {
+    return {
+      status: 403,
+      body: {
+        error: 'PREMIUM_LIMIT_REACHED',
+        message: `Ücretsiz planda en fazla ${limits.maxActiveProducts} ürün takip edebilirsin. Daha fazlası için Premium'a geç.`,
+      },
+    };
+  }
+
+  if (limits.reAddCooldownMs > 0) {
+    const lastRemoval = await subscriptionStore.lastRemovalAt(userId, q);
+    const remainingMs = lastRemoval ? limits.reAddCooldownMs - (Date.now() - new Date(lastRemoval).getTime()) : 0;
+    if (remainingMs > 0) {
+      return {
+        status: 429,
+        body: {
+          error: 'PREMIUM_COOLDOWN_ACTIVE',
+          message: `Bir ürünü çıkardıktan sonra yeni ürün eklemek için ${Math.ceil(remainingMs / (60 * 60 * 1000))} saat daha beklemen gerekiyor. Premium'da bu bekleme yok.`,
+          cooldownRemainingMs: remainingMs,
+        },
+      };
+    }
+  }
+  return null;
+}
+
+// beforeScrape (isteğe bağlı): görülmemiş bir URL için PAHALI sayfa taraması başlamadan hemen önce çağrılır; hata
+// nesnesi döndürürse tarama hiç yapılmaz. Böylece ürün ekleyemeyecek bir kullanıcı (limit dolu, bekleme sürüyor)
+// herkesin paylaştığı tarama kuyruğunu ve marka sitelerine giden istekleri tüketemez.
+async function findOrCreateTarget({ url, brand, htmlOverride, beforeScrape }) {
   const urlKey = normalizeTrackingUrl(url);
   let target = await trackedTargetStore.findByKey(urlKey);
   if (target) return { target, error: null };
@@ -104,6 +139,11 @@ async function findOrCreateTarget({ url, brand, htmlOverride }) {
   // kullanıcı aynı anda yeni ürün eklerse sunucu onlarca Chromium örneği
   // açıp tıkanmıyor. İstek yine de job tamamlanana kadar bekleyip aynı
   // response cycle'ında sonuçlanır (mobil tarafta değişiklik gerekmiyor).
+  if (beforeScrape) {
+    const denied = await beforeScrape();
+    if (denied) return { target: null, error: denied };
+  }
+
   const job = await scrapeQueue.add('resolve-target', { url, brandId: brand.id, htmlOverride, urlKey });
 
   let result;
@@ -165,7 +205,7 @@ function toApiShape(subscription, target, variant, previous) {
 // yeni bir abonelik (subscription) eklenir. Aynı kullanıcı aynı renk/bedeni
 // tekrar eklerse (daha önce silmişse) tercihleri güncellenip yeniden aktive
 // edilir, mükerrer kayıt oluşmaz.
-router.post('/', asyncHandler(async (req, res) => {
+router.post('/', userScrapeLimiter, asyncHandler(async (req, res) => {
   const { userId, url, sku } = req.body || {};
   const html = clientHtmlAllowed() ? (req.body || {}).html : undefined;
 
@@ -189,7 +229,18 @@ router.post('/', asyncHandler(async (req, res) => {
     });
   }
 
-  const { target, error } = await findOrCreateTarget({ url, brand, htmlOverride: html });
+  // Plan (premium mi?) kilidin DIŞINDA okunur: kilit içinde yalnızca tx bağlantısı kullanılır (bkz. withUserLock).
+  const limits = limitsForTier(await userStore.isPremium(userId));
+
+  // Bilinmeyen bir URL yeni sayfa taraması demek: ürün ekleyemeyecek kullanıcıyı taramadan ÖNCE geri çeviriyoruz.
+  // (Bilinen sınır: limiti dolu bir kullanıcı, zaten takip ettiği ürünün başka bir bedenini, sistemin henüz tanımadığı
+  // bir URL biçimiyle eklemeye çalışırsa da reddedilir; uygulamanın resolve'dan gelen URL'siyle bu olmaz.)
+  const { target, error } = await findOrCreateTarget({
+    url,
+    brand,
+    htmlOverride: html,
+    beforeScrape: () => checkNewProductAllowed(userId, limits),
+  });
   if (error) return res.status(error.status).json(error.body);
 
   const variant = target.variants.find((v) => v.sku === sku);
@@ -218,54 +269,39 @@ router.post('/', asyncHandler(async (req, res) => {
     lastNotifiedAvailability: variant.availability,
   };
 
-  const existing = await subscriptionStore.findByUserTargetSku(userId, target.id, sku);
-  // Kullanıcı bu renk/bedeni ZATEN aktif olarak takip ediyorsa (silmemişse)
-  // bu bir tekrar-ekleme denemesidir — mobil taraf bunu görüp farklı bir
-  // mesaj gösterebilsin diye ayrı bir alanda işaretliyoruz. Daha önce silinip
-  // şimdi yeniden eklenen (existing var ama active:false) gerçek bir yeni
-  // ekleme sayılır, "zaten takipte" değildir.
-  const alreadyTracked = !!existing?.active;
+  // Kontrol + yazma tek kilit altında: aynı kullanıcının eşzamanlı istekleri sırayla çalışır, böylece limit/bekleme
+  // aşılamaz ve aynı (ürün, beden) için mükerrer satır oluşmaz.
+  let outcome;
+  try {
+    outcome = await subscriptionStore.withUserLock(userId, async (tx) => {
+      const existing = await subscriptionStore.findByUserTargetSku(userId, target.id, sku, tx);
+      // Kullanıcı bu renk/bedeni ZATEN aktif olarak takip ediyorsa (silmemişse) bu bir tekrar-ekleme denemesidir —
+      // mobil taraf bunu görüp farklı bir mesaj gösterebilsin diye ayrı bir alanda işaretliyoruz. Daha önce silinip
+      // şimdi yeniden eklenen (existing var ama active:false) gerçek bir yeni ekleme sayılır.
+      const alreadyTracked = !!existing?.active;
 
-  // Bu SKU'dan bağımsız olarak: kullanıcının bu HEDEF (ürün) için zaten
-  // aktif bir aboneliği var mı? Aynı ürünün farklı bir bedenini eklemek
-  // (ör. S zaten takipteyken M'yi de eklemek) yeni bir "slot" tüketmemeli —
-  // limit ürün bazlı, sku bazlı değil (bkz. store/subscriptionStore.js
-  // countActiveByUser'ın artık DISTINCT target_id sayması).
-  const hasProductSlot = alreadyTracked || (await subscriptionStore.hasActiveSubscriptionForTarget(userId, target.id));
+      // Limit ürün (hedef) bazlı: aynı ürünün başka bir bedenini eklemek yeni slot tüketmez.
+      const hasProductSlot =
+        alreadyTracked || (await subscriptionStore.hasActiveSubscriptionForTarget(userId, target.id, tx));
 
-  // Bu ürün için zaten bir slot varsa (aynı sku ya da aynı ürünün başka bir
-  // bedeni) plan limiti/bekleme kuralı uygulanmaz.
-  if (!hasProductSlot) {
-    const isPremium = await userStore.isPremium(userId);
-    const limits = limitsForTier(isPremium);
-
-    const activeCount = await subscriptionStore.countActiveByUser(userId);
-    if (activeCount >= limits.maxActiveProducts) {
-      return res.status(403).json({
-        error: 'PREMIUM_LIMIT_REACHED',
-        message: `Ücretsiz planda en fazla ${limits.maxActiveProducts} ürün takip edebilirsin. Daha fazlası için Premium'a geç.`,
-      });
-    }
-
-    if (limits.reAddCooldownMs > 0) {
-      const lastRemoval = await subscriptionStore.lastRemovalAt(userId);
-      const remainingMs = lastRemoval
-        ? limits.reAddCooldownMs - (Date.now() - new Date(lastRemoval).getTime())
-        : 0;
-      if (remainingMs > 0) {
-        return res.status(429).json({
-          error: 'PREMIUM_COOLDOWN_ACTIVE',
-          message:
-            `Bir ürünü çıkardıktan sonra yeni ürün eklemek için ${Math.ceil(remainingMs / (60 * 60 * 1000))} saat daha beklemen gerekiyor. Premium'da bu bekleme yok.`,
-          cooldownRemainingMs: remainingMs,
-        });
+      if (!hasProductSlot) {
+        const denied = await checkNewProductAllowed(userId, limits, tx);
+        if (denied) return { error: denied };
       }
-    }
-  }
 
-  const subscription = existing
-    ? await subscriptionStore.update(existing.id, patch)
-    : await subscriptionStore.create({ userId, targetId: target.id, sku, ...patch });
+      const subscription = existing
+        ? await subscriptionStore.update(existing.id, patch, tx)
+        : await subscriptionStore.create({ userId, targetId: target.id, sku, ...patch }, tx);
+      return { subscription, alreadyTracked };
+    });
+  } catch (err) {
+    if (err.code === '55P03') {
+      return res.status(503).json({ error: 'BUSY', message: 'Çok sayıda istek var, lütfen biraz sonra tekrar dene.' });
+    }
+    throw err;
+  }
+  if (outcome.error) return res.status(outcome.error.status).json(outcome.error.body);
+  const { subscription, alreadyTracked } = outcome;
 
   // Hedef daha önce (son abonesi silindiği için) pasifleşmiş olabilir —
   // yeniden abone olunca worker'ın tekrar taraması için aktive edilir.
@@ -325,7 +361,8 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   if (!sub || !sub.active || sub.userId !== userId) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'Takip kaydı bulunamadı.' });
   }
-  await subscriptionStore.remove(sub.id);
+  // Aynı kilit: eşzamanlı bir ekleme, silme işlenmeden bekleme süresi kontrolünü geçip 48 saatlik kuralı atlatamasın.
+  await subscriptionStore.withUserLock(userId, (tx) => subscriptionStore.remove(sub.id, tx));
 
   // Bu hedefe artık kimse abone değilse worker'ın boşuna taramaması için
   // pasifleştir (veri/geçmiş silinmez, biri tekrar abone olursa devam eder).

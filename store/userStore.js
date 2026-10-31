@@ -46,6 +46,43 @@ async function setPremium(userId, premium) {
   return mapRow(rows[0]);
 }
 
+// Premium durumunu uygular ve ÖNCEKİ durumu bildirir. eventAtMs (olay zamanı) verilirse, kayıtlı son olaydan daha ESKİ bir
+// olay durumu ezmez (applied:false): yeniden denemeler ve sıra karışması daha yeni bir EXPIRATION'ı eski bir RENEWAL ile
+// geri almasın. eventAtMs yoksa (geliştirme ucu, testler) her zaman uygulanır ve olay zamanına dokunulmaz.
+async function applyPremiumState(userId, premium, { eventAtMs = null } = {}) {
+  return db.withTransaction(async (tx) => {
+    const { rows } = await tx.query('SELECT is_premium, premium_event_at FROM users WHERE user_id = $1 FOR UPDATE', [userId]);
+    const prev = rows[0] || null;
+    if (prev && eventAtMs != null && prev.premium_event_at && eventAtMs < prev.premium_event_at.getTime()) {
+      return { applied: false, previous: prev.is_premium, current: prev.is_premium };
+    }
+    await tx.query(
+      `INSERT INTO users (user_id, is_premium, premium_event_at) VALUES ($1, $2, $3)
+       ON CONFLICT (user_id) DO UPDATE SET
+         is_premium = EXCLUDED.is_premium,
+         premium_event_at = GREATEST(users.premium_event_at, EXCLUDED.premium_event_at)`,
+      [userId, !!premium, eventAtMs != null ? new Date(eventAtMs) : null]
+    );
+    return { applied: true, previous: prev ? prev.is_premium : null, current: !!premium };
+  });
+}
+
+// Premium görünen ve doğrulaması `staleMs`'ten eski (ya da hiç yapılmamış) kullanıcılar, en eski doğrulama önce.
+async function listPremiumDueForCheck(limit, staleMs) {
+  const { rows } = await db.query(
+    `SELECT user_id FROM users
+     WHERE is_premium AND (premium_checked_at IS NULL OR premium_checked_at < now() - make_interval(secs => $2))
+     ORDER BY premium_checked_at NULLS FIRST, id
+     LIMIT $1`,
+    [Number(limit), Number(staleMs) / 1000]
+  );
+  return rows.map((r) => r.user_id);
+}
+
+async function markPremiumChecked(userId) {
+  await db.query('UPDATE users SET premium_checked_at = now() WHERE user_id = $1', [userId]);
+}
+
 // Hesap silindi mi? (bkz. deleteAccount) — kimlik doğrulama her istekte sorar.
 async function isDeleted(userId) {
   const { rowCount } = await db.query('SELECT 1 FROM deleted_users WHERE user_id = $1', [userId]);
@@ -75,4 +112,4 @@ async function deleteAccount(userId) {
   }
 }
 
-module.exports = { getOrCreate, isPremium, setPremium, isDeleted, deleteAccount };
+module.exports = { getOrCreate, isPremium, setPremium, applyPremiumState, listPremiumDueForCheck, markPremiumChecked, isDeleted, deleteAccount };

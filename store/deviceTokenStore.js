@@ -1,4 +1,5 @@
 const db = require('./db');
+const { MAX_DEVICE_TOKENS_PER_USER } = require('../constants');
 
 function mapRow(row) {
   if (!row) return null;
@@ -27,6 +28,13 @@ async function upsert({ userId, expoPushToken, platform }) {
        SET platform = EXCLUDED.platform, updated_at = now()
      RETURNING *`,
     [userId, expoPushToken, platform ?? null]
+  );
+  // Kullanıcı başına üst sınır: en son kullanılan MAX_DEVICE_TOKENS_PER_USER jeton kalır (sahte jeton seli bildirim
+  // başına Expo'ya yüzlerce mesaj demek olurdu). Gerçek bir kullanıcının 10'dan fazla cihazı olmaz.
+  await db.query(
+    `DELETE FROM device_tokens WHERE user_id = $1 AND id NOT IN (
+       SELECT id FROM device_tokens WHERE user_id = $1 ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT $2)`,
+    [userId, MAX_DEVICE_TOKENS_PER_USER]
   );
   return mapRow(rows[0]);
 }

@@ -20,7 +20,7 @@ const { WORKER_TICK_MS } = require('./constants');
 const db = require('./store/db');
 const { retentionQueue } = require('./queue/scrapeQueue');
 const { productsLimiter, generalLimiter } = require('./middleware/rateLimit');
-const { isDevMode, assertProductionConfig, applyTrustProxy, corsOptions } = require('./config');
+const { isDevMode, assertProductionConfig, assertBillingConfig, applyTrustProxy, corsOptions } = require('./config');
 
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // günde bir kez yeter
 
@@ -91,6 +91,7 @@ if (require.main === module) {
     // Canlıda AUTH_SECRET yoksa/kısaysa burada patlar (fail-closed).
     assertAuthConfigured();
     assertProductionConfig();
+    assertBillingConfig();
     await db.migrate();
 
     // Geliştirme kolaylıkları (kimliksiz /users/:id/premium ucu, fixture yedeği,
@@ -130,6 +131,8 @@ if (require.main === module) {
     await retentionQueue.add('prune-price-history', {}, { repeat: { every: RETENTION_INTERVAL_MS } });
     // Marka bazlı tarama sağlığı raporu (sağlıksız marka -> ERROR logu, bkz. monitoring/brandHealth.js).
     await retentionQueue.add('brand-health', {}, { repeat: { every: 30 * 60 * 1000 } });
+    // Premium görünen kullanıcıları RevenueCat'e göre doğrular (kaçan EXPIRATION/iade olayları için, bkz. billing/reconcile.js).
+    await retentionQueue.add('premium-reconcile', {}, { repeat: { every: 60 * 60 * 1000 } });
   })().catch((err) => {
     // Açılış hatası (ör. AUTH_SECRET eksik, DB/Redis erişilemiyor) ölümcül: aşağıdaki
     // unhandledRejection işleyicisi süreci AYAKTA tutar, bu da dinlemeyen bir "zombi"

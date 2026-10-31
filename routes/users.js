@@ -5,7 +5,9 @@ const { limitsForTier, NOTIFICATION_RETENTION_DAYS } = require('../constants');
 const logger = require('../logger');
 const { isDevMode } = require('../config');
 const { maskId } = require('../middleware/requestLog');
-const { hasActiveEntitlement, deleteSubscriber } = require('../billing/revenuecat');
+const { fetchPremiumState, deleteSubscriber } = require('../billing/revenuecat');
+const { setPlan } = require('../billing/plan');
+const { syncLimiter } = require('../middleware/rateLimit');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { matchUserParam } = require('../middleware/auth');
 const notificationStore = require('../store/notificationStore');
@@ -14,8 +16,6 @@ const router = express.Router();
 
 // Yoldaki :userId her zaman token'daki kimlikle aynı olmalı (başkasının planını okuyamaz/değiştiremez).
 router.param('userId', matchUserParam);
-
-const REVENUECAT_API_BASE = 'https://api.revenuecat.com/v1';
 
 // GET /api/users/:userId/limits
 // Mobil "Ürün Ekle" ve "Ürünlerim" ekranlarının, kullanıcı bir işlem
@@ -68,8 +68,8 @@ router.post('/:userId/premium', asyncHandler(async (req, res) => {
   if (typeof isPremium !== 'boolean') {
     return res.status(400).json({ error: 'INVALID_REQUEST', message: 'isPremium (boolean) zorunlu.' });
   }
-  const record = await userStore.setPremium(userId, isPremium);
-  return res.json({ userId: record.userId, isPremium: record.isPremium });
+  const result = await setPlan(userId, isPremium);
+  return res.json({ userId, isPremium: result.current });
 }));
 
 // POST /api/users/:userId/sync-premium
@@ -82,40 +82,25 @@ router.post('/:userId/premium', asyncHandler(async (req, res) => {
 // birkaç saniye gecikebiliyor (bkz. o dosyadaki yorum) — bu uç nokta satın
 // alma/restore sonrası UI'ın DB'yi yanlış bir şeye ayarlama riski olmadan
 // hemen doğru durumu göstermesini sağlıyor.
-router.post('/:userId/sync-premium', asyncHandler(async (req, res) => {
+router.post('/:userId/sync-premium', syncLimiter, asyncHandler(async (req, res) => {
   const { userId } = req.params;
-  const secretKey = process.env.REVENUECAT_SECRET_KEY;
-  if (!secretKey) {
+  if (!process.env.REVENUECAT_SECRET_KEY) {
     return res.status(503).json({
       error: 'NOT_CONFIGURED',
       message: 'RevenueCat sunucu entegrasyonu henüz yapılandırılmadı (REVENUECAT_SECRET_KEY eksik).',
     });
   }
 
-  let subscriber;
-  try {
-    const rcRes = await fetch(`${REVENUECAT_API_BASE}/subscribers/${encodeURIComponent(userId)}`, {
-      headers: { Authorization: `Bearer ${secretKey}` },
-    });
-    if (!rcRes.ok) {
-      logger.error({ userId: maskId(userId), status: rcRes.status }, '[users] RevenueCat subscriber sorgusu başarısız');
-      return res.status(502).json({ error: 'REVENUECAT_ERROR', message: 'RevenueCat sorgulanamadı.' });
-    }
-    ({ subscriber } = await rcRes.json());
-  } catch (err) {
-    logger.error({ userId: maskId(userId), err: err.message }, '[users] RevenueCat isteği atılamadı');
+  // RevenueCat'in REST API'si GEÇMİŞ dahil tüm yetkileri döner; aktif mi diye süre ve sandbox kontrolü
+  // billing/revenuecat.js'te yapılır. Durum "şimdi" doğrulandığı için olay zamanı olarak şimdi kullanılır: bundan
+  // eski bir webhook olayı sonradan gelse bile bu sonucu ezmez.
+  const state = await fetchPremiumState(userId);
+  if (!state.ok) {
+    logger.error({ userId: maskId(userId), reason: state.reason }, '[users] RevenueCat subscriber sorgusu başarısız');
     return res.status(502).json({ error: 'REVENUECAT_ERROR', message: 'RevenueCat sorgulanamadı.' });
   }
-
-  // RevenueCat'in REST API'si "entitlements" altında kullanıcının GELMİŞ
-  // GEÇMİŞ tüm entitlement'larını döner (SDK'daki customerInfo.entitlements
-  // .active gibi önceden filtrelenmiş değil) — aktif mi diye expires_date'i
-  // kendimiz kontrol ediyoruz; sandbox satın almalar geliştirme modu dışında
-  // sayılmaz (bkz. billing/revenuecat.js).
-  const isPremium = hasActiveEntitlement(subscriber);
-
-  const record = await userStore.setPremium(userId, isPremium);
-  return res.json({ userId: record.userId, isPremium: record.isPremium });
+  const result = await setPlan(userId, state.isPremium, { eventAtMs: Date.now() });
+  return res.json({ userId, isPremium: result.current });
 }));
 
 // GET /api/users/:userId/notifications?limit=50

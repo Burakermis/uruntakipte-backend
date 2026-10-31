@@ -142,10 +142,25 @@ async function claimAttempt(target) {
 async function notFoundStatsByBrand(brand) {
   const { rows } = await db.query(
     `SELECT count(*)::int AS active, count(*) FILTER (WHERE not_found_count > 0)::int AS suspects
-     FROM tracked_targets WHERE active = true AND brand IS NOT DISTINCT FROM $1`,
+     FROM tracked_targets t
+     WHERE t.active = true AND t.brand IS NOT DISTINCT FROM $1
+       AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.target_id = t.id AND s.active = true)`,
     [brand ?? null]
   );
   return rows[0];
 }
 
-module.exports = { notFoundStatsByBrand, findByKey, findById, findByIds, create, addAliasKey, listActive, update, claimAttempt };
+// Aktif abonesi olmayan hedefleri pasifleştirir (graceMs'ten eski olanlar: yeni oluşan hedefin ilk aboneliği birkaç saniye
+// içinde gelir). Ürün ekleme isteği limit/beden hatasıyla reddedilince hedef geride kalır; bunlar taranmaz ama birikir
+// ve marka istatistiklerini seyreltir. Biri yeniden abone olursa POST /products hedefi tekrar aktifleştirir.
+async function deactivateOrphans(graceMs) {
+  const { rowCount } = await db.query(
+    `UPDATE tracked_targets t SET active = false
+     WHERE t.active = true AND t.created_at < now() - make_interval(secs => $1)
+       AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.target_id = t.id AND s.active = true)`,
+    [Number(graceMs) / 1000]
+  );
+  return rowCount;
+}
+
+module.exports = { deactivateOrphans, notFoundStatsByBrand, findByKey, findById, findByIds, create, addAliasKey, listActive, update, claimAttempt };

@@ -58,4 +58,18 @@ function applyTrustProxy(app, value) {
   return hops;
 }
 
-module.exports = { isDevMode, assertProductionConfig, trustProxyHops, applyTrustProxy, corsOptions };
+// Canlıda satın alma entegrasyonu yapılandırılmadan açılmayı reddeder. İkisi de gerekli: webhook secret'ı olmadan
+// RevenueCat olayları her zaman 401 alır (satın alanlar premium olmaz), sunucu anahtarı olmadan sync-premium 503 verir
+// ve premium uzlaştırma çalışmaz (iade/süre bitişi kaçarsa premium sonsuza kadar sürer). Henüz ücretli plan olmadan
+// (yalnızca ücretsiz sürüm) yayına çıkılıyorsa ALLOW_MISSING_BILLING=1 ile bilinçli olarak atlanır. Yalnızca API açılışında.
+function assertBillingConfig(env = process.env) {
+  if (env.NODE_ENV !== 'production' || env.ALLOW_MISSING_BILLING === '1') return;
+  const missing = ['REVENUECAT_WEBHOOK_SECRET', 'REVENUECAT_SECRET_KEY'].filter((k) => !String(env[k] || '').trim());
+  if (missing.length > 0) {
+    throw new Error(
+      `Satın alma yapılandırması eksik: ${missing.join(', ')}. Ücretli plan yoksa ALLOW_MISSING_BILLING=1 verin.`
+    );
+  }
+}
+
+module.exports = { assertBillingConfig, isDevMode, assertProductionConfig, trustProxyHops, applyTrustProxy, corsOptions };

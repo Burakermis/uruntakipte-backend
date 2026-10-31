@@ -18,6 +18,8 @@ const notificationStore = require('../store/notificationStore');
 const { processReceipts } = require('../notifications/receipts');
 const { reportBrandHealth } = require('../monitoring/brandHealth');
 const { checkTrackedTarget } = require('../checker');
+const { reconcilePremium } = require('../billing/reconcile');
+const { ORPHAN_TARGET_GRACE_MS } = require('../constants');
 const { isTargetDue } = require('../checkSchedule');
 const { prewarmBrowser } = require('../scraper/browserFetch');
 const htmlCache = require('../store/htmlCache');
@@ -169,7 +171,8 @@ async function processCheckJob(job) {
 // 90 günden eski, fiyat/durumu son kayıttan farklı OLMAYAN ardışık priceHistory
 // kayıtlarını buda (bkz. priceHistoryStore.pruneUnchanged).
 async function processRetentionJob(job) {
-  // Aynı kuyrukta iki tekrarlayan iş: günlük temizlik ve 30 dakikada bir marka sağlığı raporu.
+  // Aynı kuyrukta tekrarlayan işler: günlük temizlik, 30 dakikada bir marka sağlığı raporu, saatlik premium uzlaştırma.
+  if (job?.name === 'premium-reconcile') return reconcilePremium();
   if (job?.name === 'brand-health') {
     const brands = await reportBrandHealth();
     return { brands: brands.length, unhealthy: brands.filter((b) => b.unhealthy).map((b) => b.brand) };
@@ -177,8 +180,10 @@ async function processRetentionJob(job) {
   const deleted = await priceHistoryStore.pruneUnchanged(90);
   // Bildirim geçmişi: NOTIFICATION_RETENTION_DAYS günden eskileri sil (bkz. store/notificationStore.js).
   const notificationsDeleted = await notificationStore.pruneOlderThan();
-  logger.info({ deleted, notificationsDeleted }, '[worker-process] retention tamamlandı');
-  return { deleted, notificationsDeleted };
+  // Aboneliği kalmamış hedefler (reddedilen/yarım kalan ürün eklemeleri) pasifleşir: birikmesinler, istatistik bozmasınlar.
+  const orphansDeactivated = await trackedTargetStore.deactivateOrphans(ORPHAN_TARGET_GRACE_MS);
+  logger.info({ deleted, notificationsDeleted, orphansDeactivated }, '[worker-process] retention tamamlandı');
+  return { deleted, notificationsDeleted, orphansDeactivated };
 }
 
 // Push teslimat makbuzları (bkz. notifications/receipts.js): hazır olmayanlar iş verisinde bırakılıp iş

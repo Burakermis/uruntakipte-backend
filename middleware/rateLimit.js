@@ -31,8 +31,9 @@ function getRedisClient() {
  * Redis erişilemezse istek ENGELLENMEZ (passOnStoreError): sınırlayıcı bir koruma katmanıdır, tek başına
  * kesinti nedeni olmamalı.
  */
-function makeLimiter({ name, windowMs, limit }, { store = resolveStoreKind(), client } = {}) {
+function makeLimiter({ name, windowMs, limit, keyGenerator }, { store = resolveStoreKind(), client } = {}) {
   const options = { windowMs, limit, standardHeaders: true, legacyHeaders: false, message: MESSAGE };
+  if (keyGenerator) options.keyGenerator = keyGenerator;
   if (store === 'redis') {
     const redis = client || getRedisClient();
     options.store = new RedisStore({ sendCommand: (...args) => redis.call(...args), prefix: `rl:${name}:` });
@@ -54,4 +55,15 @@ const generalLimiter = makeLimiter({ name: 'general', windowMs: 60 * 1000, limit
 // (IP başına saatte 20).
 const registerLimiter = makeLimiter({ name: 'register', windowMs: 60 * 60 * 1000, limit: 20 });
 
-module.exports = { productsLimiter, generalLimiter, registerLimiter, makeLimiter, resolveStoreKind };
+// Kullanıcı BAŞINA sınırlar (anahtar: oturumdaki userId; requireAuth'tan sonra çalışmalı). IP bazlı sınırlar yeni kimliğin
+// bedava olduğu bir sistemde tek başına yetmez: bir kullanıcı pahalı işleri (sayfa taraması, RevenueCat sorgusu) kendi
+// payından fazla tetikleyip herkesin kuyruğunu/kotasını tüketemesin.
+const byUser = (req) => req.userId || 'anonymous';
+
+// Sayfa taramayı tetikleyen uçlar (resolve, ürün ekleme): 5 dakikada 30 — normal kullanım bunun çok altında.
+const userScrapeLimiter = makeLimiter({ name: 'scrape-user', windowMs: 5 * 60 * 1000, limit: 30, keyGenerator: byUser });
+
+// sync-premium her çağrıda RevenueCat API'sini çağırır; anahtarın kotası herkesle ortak.
+const syncLimiter = makeLimiter({ name: 'sync-user', windowMs: 60 * 1000, limit: 6, keyGenerator: byUser });
+
+module.exports = { userScrapeLimiter, syncLimiter, productsLimiter, generalLimiter, registerLimiter, makeLimiter, resolveStoreKind };
