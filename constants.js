@@ -64,7 +64,22 @@ const NOTIFICATION_MAX_PER_USER = 100;
 // Devre kesicinin geri çekilmesiyle (bkz. CIRCUIT_BREAKER) bu, yaklaşık bir gün sürekli hata demektir.
 const FAILURE_NOTIFY_THRESHOLD = 10;
 
+// "Ürün sayfası yok" (404/soft-404) görülünce abonelikleri kapatma kuralları (bkz. goneDecision.js). Geçici bir 404
+// (dağıtım, CDN, engel) kimsenin takibini silmesin diye kapatma üç şarta bağlı:
+//   - minChecks + minDurationMs : kesintisiz en az bu kadar kontrolde ve bu kadar süredir 404.
+//   - brandSuspectRatio / brandMinTargets : markanın aktif hedeflerinin bu oranı (en az brandMinTargets hedef varken)
+//     aynı anda 404 serisindeyse ürün değil site sorunu say, kapatma.
+//   - maxHoldMs : bu kadar süre kesintisiz 404 şalteri aşar (gerçekten kalkmıştır).
+const PRODUCT_GONE = {
+  minChecks: 3,
+  minDurationMs: 60 * 60 * 1000,
+  maxHoldMs: 24 * 60 * 60 * 1000,
+  brandSuspectRatio: 0.3,
+  brandMinTargets: 5,
+};
+
 module.exports = {
+  PRODUCT_GONE,
   NOTIFICATION_RETENTION_DAYS,
   NOTIFICATION_MAX_PER_USER,
   FAILURE_NOTIFY_THRESHOLD,
