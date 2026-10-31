@@ -70,5 +70,52 @@ check(
 );
 check('renk seçici yoksa varsayılan renk', discounted.variants[0].color, 'Tek Renk');
 
+console.log('\n--- canlı sayfa (2026-10, Mango sınıf adlarını hash\'ledikten sonra alındı) ---');
+// Bu fixture gerçek canlı sayfadan kesilmiş (yalnızca script/style çıkarıldı). Mango CSS sınıf
+// adlarını değiştirdiğinde eski fixture'lar (elle kırpılmış, eski sınıflı) geçmeye devam edip
+// canlıda her ürünü PARSE_FAILED yapmıştı; bu fixture o sınıf hatasını yakalamak için var.
+const LIVE_URL =
+  'https://shop.mango.com/tr/tr/p/erkek/h%C4%B1rka-ve-kazak/100-yun/ince-triko-100-yun-h%C4%B1rka/37067886/94/00';
+const liveHtml = fs.readFileSync(path.join(__dirname, 'fixtures/mango-hirka-live-2026-10.html'), 'utf8');
+const live = parseMangoProduct(liveHtml, LIVE_URL);
+check('canlı: ürün çözüldü (en az 1 beden)', live.variants.length > 0, true);
+check('canlı: productId', live.productId, '37067886');
+check('canlı: isim', live.name, 'İnce triko %100 yün hırka');
+check('canlı: renk', live.variants[0]?.color, 'Orta Kırçıllı Gri');
+check('canlı: fiyat', live.variants[0]?.price, 3999.99);
+check('canlı: para birimi', live.variants[0]?.currency, 'TRY');
+check('canlı: bedenler', live.variants.map((v) => v.size), ['S', 'M', 'L', 'XL', 'XXL']);
+check(
+  'canlı: stok (XL id\'de "unavailable")',
+  live.variants.map((v) => v.availability),
+  ['in_stock', 'in_stock', 'in_stock', 'out_of_stock', 'in_stock']
+);
+check(
+  'canlı: kardeş renkler',
+  live.relatedColors.map((c) => ({ name: c.name, colorId: c.colorId, selected: c.selected })),
+  [
+    { name: 'Siyah', colorId: '99', selected: false },
+    { name: 'Orta Kırçıllı Gri', colorId: '94', selected: true },
+    { name: 'Çikolata', colorId: '32', selected: false },
+  ]
+);
+
+console.log('\n--- sınıf adlarından bağımsızlık (tüm class öznitelikleri silinince sonuç aynı kalmalı) ---');
+// Derleme-bazlı CSS sınıfları her deploy'da değişir; parser yalnızca id / itemprop / alt / metin gibi
+// kalıcı sinyallere dayanmalı. Sınıfsız HTML'de de aynı sonucu vermiyorsa sınıfa bağımlı demektir.
+const stripClasses = (h) => h.replace(/\sclass="[^"]*"/g, '');
+const summarize = (p) => ({
+  name: p.name,
+  variants: p.variants.map((v) => [v.sku, v.color, v.size, v.price, v.currency, v.availability]),
+  colors: p.relatedColors.map((c) => [c.name, c.selected]),
+});
+check('canlı fixture, sınıfsız', summarize(parseMangoProduct(stripClasses(liveHtml), LIVE_URL)), summarize(live));
+const strippedDiscount = parseMangoProduct(
+  stripClasses(discountHtml),
+  'https://shop.mango.com/tr/tr/p/erkek/hirka-ve-kazak/polo-yaka-tisort/100-merinos-yunu-polo-kazak/27051283/35/00'
+);
+check('indirimli fixture, sınıfsız: güncel fiyat', strippedDiscount.variants[0].price, 1699.99);
+check('indirimli fixture, sınıfsız: stok', strippedDiscount.variants.map((v) => v.availability), discounted.variants.map((v) => v.availability));
+
 console.log(`\n${ok ? '✔ Tüm testler geçti' : '✘ Bazı testler başarısız'}`);
 process.exit(ok ? 0 : 1);

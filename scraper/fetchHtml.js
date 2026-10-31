@@ -12,8 +12,6 @@ const { isDevMode } = require('../config');
 const DEV_FIXTURES = {
   'https://www.zara.com/tr/tr/aaron-levine-x-zara-uzun-kollu-t-shirt-p01887320.html':
     path.join(__dirname, '..', 'fixtures', 'zara-aaron-levine-tshirt.html'),
-  'https://www2.hm.com/tr_tr/productpage.1336969003.html':
-    path.join(__dirname, '..', 'fixtures', 'hm-product-snippet.html'),
 };
 
 const ALLOW_FIXTURE_FALLBACK = isDevMode();
@@ -39,6 +37,25 @@ function looksLikeBlockedResponse(html) {
   return !html || html.length < 5000;
 }
 
+// "Ürün artık yok" ile "engellendik" farklı şeylerdir: engel geçicidir (tekrar denenir), ürün kalkmışsa takibin
+// anlamı kalmaz. İki sinyal: sunucu 404/410 döndü ya da (tek sayfa uygulamalar 200 ile "bulunamadı" sayfası
+// gösterir, ör. Oysho) <title> "Sayfa Bulunamadı" gibi bir şey. Bilerek yalnızca BAŞLIĞA bakılır; sayfa
+// gövdesindeki "bulunamadı" metni (öneri kutuları, çeviri tabloları) yanlış alarm üretirdi.
+const NOT_FOUND_TITLE = /^\s*(sayfa bulunamad|ürün bulunamad|sayfa mevcut değil|404\b|page not found|not found)/i;
+
+function isGoneStatus(status) {
+  return status === 404 || status === 410;
+}
+
+function looksLikeNotFoundPage(html) {
+  const title = ((html || '').match(/<title[^>]*>([^<]*)/i) || [])[1] || '';
+  return NOT_FOUND_TITLE.test(title.replace(/&nbsp;/g, ' '));
+}
+
+function notFoundResult(status) {
+  return { html: null, source: 'not-found', notFound: true, status: status ?? null };
+}
+
 async function tryPlainFetch(url, timeoutMs) {
   try {
     const controller = new AbortController();
@@ -61,6 +78,8 @@ async function tryPlainFetch(url, timeoutMs) {
  *      yani her taramaya boşuna ~0,2-1,2sn ekliyordu, artık atlanıyor.
  *   2) gerçek headless tarayıcı (Playwright)
  *   3) tarayıcı da engelli/boş döndüyse: ısınma navigasyonlu ikinci deneme
+ *   Ürün sayfası yoksa (404/410 ya da "Sayfa Bulunamadı" sayfası) { notFound: true, html: null } döner; çağıranlar
+ *   bunu "engellendi"den ayırıp ürünü takipten çıkarır.
  *   4) (sadece dev modunda) bilinen bir demo URL'i için kayıtlı fixture
  * Hepsi başarısız olursa null döner.
  */
@@ -76,6 +95,7 @@ async function fetchHtml(url, { timeoutMs = 10000, brandId } = {}) {
 
   const browserTimeout = Math.max(timeoutMs * 2.5, 25000);
   const rendered = await fetchHtmlWithBrowser(url, { timeoutMs: browserTimeout, brandId });
+  if (isGoneStatus(rendered.status) || looksLikeNotFoundPage(rendered.html)) return notFoundResult(rendered.status);
   if (rendered.html && !looksLikeBlockedResponse(rendered.html)) {
     return { html: rendered.html, source: 'live-browser' };
   }
@@ -88,6 +108,7 @@ async function fetchHtml(url, { timeoutMs = 10000, brandId } = {}) {
   // deneme de reddedilecek, sadece kullanıcıyı bekletir.
   if (!rendered.hardBlocked) {
     const warmed = await fetchHtmlWithBrowser(url, { timeoutMs: browserTimeout, brandId, warmUp: true });
+    if (isGoneStatus(warmed.status) || looksLikeNotFoundPage(warmed.html)) return notFoundResult(warmed.status);
     if (warmed.html && !looksLikeBlockedResponse(warmed.html)) {
       return { html: warmed.html, source: 'live-browser-warmed' };
     }
@@ -103,4 +124,4 @@ async function fetchHtml(url, { timeoutMs = 10000, brandId } = {}) {
   return null;
 }
 
-module.exports = { fetchHtml, looksLikeBlockedResponse };
+module.exports = { fetchHtml, looksLikeBlockedResponse, looksLikeNotFoundPage, isGoneStatus };

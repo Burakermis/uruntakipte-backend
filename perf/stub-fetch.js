@@ -16,7 +16,6 @@ const browserMod = require(path.join(root, 'scraper/browserFetch'));
 
 const FIXTURE_FILE = {
   zara: 'zara-aaron-levine-tshirt.html',
-  hm: 'hm-product-snippet.html',
   pullandbear: 'pullandbear-cift-kollu-tisort.html',
   bershka: 'bershka-baskili-tshirt.html',
   mango: 'mango-denim-ceket.html',
@@ -31,7 +30,6 @@ const LATENCY_MS = {
   massimodutti: 1500,
   bershka: 1500,
   oysho: 1700,
-  hm: 3200,
   pullandbear: 3400,
   stradivarius: 4500,
 };

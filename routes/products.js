@@ -53,6 +53,9 @@ router.post('/resolve', asyncHandler(async (req, res) => {
 
   if (!resolvedHtml) {
     const fetched = await fetchHtml(url, { brandId: brand.id });
+    if (fetched?.notFound) {
+      return res.status(404).json({ error: 'PRODUCT_NOT_FOUND', message: 'Bu ürün sayfası artık mevcut değil.' });
+    }
     if (!fetched) {
       return res.status(502).json({
         error: 'FETCH_FAILED',

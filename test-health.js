@@ -74,15 +74,15 @@ const types = async (userId) => (await notificationStore.listByUser(userId)).map
     trackedTargetStore.create({ urlKey: `b-${n}`, brand, url: `https://x.com/${n}`, name: n, variants: [] }).then((tt) =>
       trackedTargetStore.update(tt.id, { consecutiveFailures: failures, lastCheckStatus: failures ? status : 'ok', active })
     );
-  // zara: 4 hedefin 3'ü sorunlu (%75) -> sağlıksız · mango: 4'te 1 (%25) -> sağlıklı · hm: 2 hedef, ikisi de bozuk ama örnek az
+  // zara: 4 hedefin 3'ü sorunlu (%75) -> sağlıksız · mango: 4'te 1 (%25) -> sağlıklı · oysho: 2 hedef, ikisi de bozuk ama örnek az
   for (const [i, f] of [[1, 5], [2, 9], [3, FAILING_AFTER], [4, 0]]) await mk(`z${i}`, 'zara', f, 'PARSE_FAILED');
   for (const [i, f] of [[1, 6], [2, 0], [3, 0], [4, 0]]) await mk(`m${i}`, 'mango', f);
-  for (const i of [1, 2]) await mk(`h${i}`, 'hm', 7);
+  for (const i of [1, 2]) await mk(`h${i}`, 'oysho', 7);
   await mk('pasif', 'zara', 50, 'FETCH_FAILED', false); // pasif hedef sayılmaz
   const health = Object.fromEntries((await brandHealth()).map((b) => [b.brand, b]));
   check('zara: 4 aktif, 3 sorunlu (eşik dahil), pasif sayılmadı, SAĞLIKSIZ', [health.zara.active, health.zara.failing, health.zara.unhealthy, health.zara.topError], [4, 3, true, 'PARSE_FAILED']);
   check('mango: %25 -> sağlıklı', [health.mango.failing, health.mango.failingRatio, health.mango.unhealthy], [1, 0.25, false]);
-  check('hm: örnek az (2 < 3 hedef) -> oran yüksek olsa da sağlıksız İŞARETLENMEZ', [health.hm.active, health.hm.failingRatio, health.hm.unhealthy], [2, 1, false]);
+  check('oysho: örnek az (2 < 3 hedef) -> oran yüksek olsa da sağlıksız İŞARETLENMEZ', [health.oysho.active, health.oysho.failingRatio, health.oysho.unhealthy], [2, 1, false]);
   const reported = await reportBrandHealth();
   check('rapor: yalnızca zara sağlıksız', reported.filter((b) => b.unhealthy).map((b) => b.brand), ['zara']);
 

@@ -8,17 +8,12 @@ const { brandFetchProfile } = require('./registry');
 // headless-tespit sinyalini (navigator.webdriver, canvas/WebGL fingerprint,
 // chrome.app, iframe.contentWindow, medya kodekleri, vb.) kapatan stealth
 // eklentisi. Not: bu proje üzerinde test ettiğimiz Akamai korumalı siteler
-// (Zara, H&M) isteği sayfa hiç yüklenmeden ağ/edge seviyesinde reddediyor —
+// (Zara) isteği sayfa hiç yüklenmeden ağ/edge seviyesinde reddediyor —
 // yani stealth'in çözebileceği sınıfın (tarayıcı parmak izi) ÖTESİNDE bir
 // engel. Yine de daha az agresif korumalı siteler için gerçek fayda sağlar.
 chromium.use(StealthPlugin());
 
-// stealth eklentisi bulunmayan, düz Playwright — sadece `fetchProfile.headed`
-// markaları için (bkz. launchBrowser).
-const { chromium: plainChromium } = require('playwright');
-
-// mod -> Promise<Browser>. 'headless': stealth'li varsayılan tarayıcı (yedi
-// marka). 'headed': H&M gibi otomasyonu tanıyan markalar için (bkz. aşağıda).
+// mod -> Promise<Browser>. Şu an tek mod var: 'headless' (stealth'li tarayıcı).
 const browserPromises = new Map();
 
 // Queue kurulana kadar (Faz 2 roadmap) sunucunun aynı anda onlarca Chromium
@@ -44,32 +39,13 @@ const READY_POLL_MS = 100;
 const BLOCK_GRACE_MS = 2000;
 const BLOCKED_HTML_MAX_LENGTH = 5000;
 
-function launchBrowser(mode) {
-  if (mode === 'headed') {
-    // ÖLÇÜM (2026-09-21, H&M): Akamai bu tarayıcıyı ANCAK şu üç koşul birlikte
-    // sağlanınca geçiriyor — biri bile eksikse "Access Denied" (322 bayt):
-    //   1) pencereli mod (headless: paketli Chromium new-headless, gerçek
-    //      Chrome headless ve headless-shell hep engellendi),
-    //   2) `--enable-automation` bayrağı ve `AutomationControlled` özelliği
-    //      kapalı (varsayılan bayraklarla gerçek Chrome bile engellendi),
-    //   3) stealth eklentisi YOK (eklenince, bayraklar kapalıyken bile
-    //      engellendi — eklentinin yamaları kendisi tespit ediliyor).
-    // Bu koşullarla 10/10 canlı sayfa alındı (paketli Chromium ve Chrome).
-    // Pencere ekran dışına açılıyor; Linux sunucuda sanal ekran gerekir
-    // (xvfb-run). Ekran yoksa açılış hata verir ve marka eskisi gibi
-    // FETCH_FAILED döner — diğer markalar etkilenmez.
-    return plainChromium.launch({
-      headless: false,
-      ignoreDefaultArgs: ['--enable-automation'],
-      args: ['--disable-blink-features=AutomationControlled', '--window-position=-2400,0'],
-    });
-  }
+function launchBrowser() {
   return chromium.launch({ headless: true });
 }
 
 function getBrowser(mode = 'headless') {
   if (!browserPromises.has(mode)) {
-    const promise = launchBrowser(mode);
+    const promise = launchBrowser();
     browserPromises.set(mode, promise);
     // Açılış başarısız olursa (ör. ekran yok) hata önbelleğe girip sonsuza
     // kadar tekrarlanmasın; tarayıcı sonradan kapanırsa da (pencereli modda
@@ -84,8 +60,7 @@ function getBrowser(mode = 'headless') {
 
 // Sunucu/worker açılışında çağrılır: ilk ürün ekleyen kullanıcı Chromium'un
 // açılmasını (~0,2-1sn) beklemesin diye tarayıcıyı önden başlatır. Hata
-// olursa sessizce geçiyoruz — ilk gerçek istekte tekrar denenir. Pencereli
-// mod önden AÇILMAZ: ekrana pencere getirir, sadece ilk H&M isteğinde açılır.
+// olursa sessizce geçiyoruz — ilk gerçek istekte tekrar denenir.
 function prewarmBrowser() {
   return getBrowser().then(
     () => logger.info('[browserFetch] Chromium önden başlatıldı'),
@@ -149,7 +124,7 @@ async function waitForBrandReady(page, ready, brandId, blockGraceMs = BLOCK_GRAC
     try {
       if (await page.evaluate(ready)) return true;
 
-      // Bot engeli sayfaları (H&M'in 322 baytlık "Access Denied"i gibi) HTTP
+      // Bot engeli sayfaları (322 baytlık "Access Denied" gibi) HTTP
       // 200 dönebiliyor — status'a bakarak yakalanamıyorlar. Kısa bir
       // toleranstan sonra hâlâ birkaç yüz baytlık bir belge varsa, bu bir
       // ürün sayfası değil: 12sn boyunca beklemenin anlamı yok.
@@ -175,6 +150,43 @@ async function waitForBrandReady(page, ready, brandId, blockGraceMs = BLOCK_GRAC
   return false;
 }
 
+const CAPTURE_WAIT_MS = 8000;
+const CAPTURED_SCRIPT_ID = '__captured_api__';
+
+// profile.captureResponse = { match: RegExp, transform(json) -> sade nesne }. İlk eşleşen JSON yanıtı tutulur.
+function startCapture(page, { match, transform }) {
+  let value = null;
+  page.on('response', (res) => {
+    if (value || !match.test(res.url())) return;
+    res.json().then(
+      (json) => {
+        try {
+          value = transform(json);
+        } catch (err) {
+          logger.warn({ err: err.message }, '[browserFetch] yakalanan API yanıtı sadeleştirilemedi');
+        }
+      },
+      () => {}
+    );
+  });
+  return {
+    async result() {
+      const deadline = Date.now() + CAPTURE_WAIT_MS;
+      while (!value && Date.now() < deadline) await page.waitForTimeout(100).catch(() => {});
+      if (!value) logger.warn({ url: page.url().slice(0, 120) }, '[browserFetch] beklenen API yanıtı yakalanamadı');
+      return value;
+    },
+  };
+}
+
+// JSON'u HTML'in sonuna gömer ("</" kaçırılır ki script bloğu erken kapanmasın).
+function embedCaptured(html, value) {
+  if (!value) return html;
+  const json = JSON.stringify(value).replace(/</g, '\\u003c');
+  const tag = `<script type="application/json" id="${CAPTURED_SCRIPT_ID}">${json}</script>`;
+  return html.includes('</body>') ? html.replace('</body>', () => tag + '</body>') : html + tag;
+}
+
 /**
  * Bir URL'i gerçek bir tarayıcıda açıp render edilmiş HTML'i döner.
  * @returns {Promise<{html: string|null, status: number|null, hardBlocked: boolean}>}
@@ -189,15 +201,10 @@ async function fetchHtmlWithBrowserInner(url, { timeoutMs = 25000, warmUp = fals
   const profile = brandFetchProfile(brandId);
   let context;
   try {
-    const headed = !!profile.headed;
-    const browser = await getBrowser(headed ? 'headed' : 'headless');
+    const browser = await getBrowser();
     context = await browser.newContext({
-      // Pencereli modda tarayıcının kendi UA'sı bırakılıyor: sabit "Chrome/128"
-      // ile gerçek sürüm (sec-ch-ua) arasındaki uyuşmazlık ek bir tutarsızlık
-      // sinyali olurdu; ölçümler de (bkz. launchBrowser) hiç UA ezmeden alındı.
-      ...(headed
-        ? {}
-        : { userAgent: USER_AGENT, extraHTTPHeaders: { 'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8' } }),
+      userAgent: USER_AGENT,
+      extraHTTPHeaders: { 'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8' },
       locale: 'tr-TR',
       viewport: { width: 1280, height: 900 },
       proxy: nextProxy(),
@@ -247,9 +254,14 @@ async function fetchHtmlWithBrowserInner(url, { timeoutMs = 25000, warmUp = fals
     // öneri motoru) inmesini beklemek demekti — oysa bizim ihtiyacımız olan
     // veri çoğu markada çok daha erken hazır. Ne zaman devam edeceğimize
     // aşağıdaki marka-özel `ready` koşulu karar veriyor.
+    // Bazı markalar (Pull&Bear) stok/beden verisini HTML'e koymayıp sayfanın kendi API çağrısıyla
+    // getiriyor ve o API'ye dışarıdan düz istek 403 dönüyor. Sayfa kendi çağrısını yaparken yanıtı
+    // burada yakalayıp (marka sadeleştirir) HTML'e gömüyoruz; parser HTML'den okumaya devam eder.
+    const capture = profile.captureResponse ? startCapture(page, profile.captureResponse) : null;
+
     const response = await page.goto(url, { waitUntil: 'commit', timeout: timeoutMs });
 
-    // Sunucu doğrudan reddettiyse (H&M bu ağdan 403 "Access Denied" veriyor)
+    // Sunucu doğrudan reddettiyse (Akamai bazı ağlardan 403 "Access Denied" veriyor)
     // sayfanın render olmasını beklemek tamamen boşuna — eskiden burada
     // hazır-olma zaman aşımı kadar (12sn) bekleyip bir de ısınmalı ikinci
     // denemeyi yapıyorduk, tek bir ürün için ~27sn ediyordu. Artık ~1sn'de
@@ -299,7 +311,9 @@ async function fetchHtmlWithBrowserInner(url, { timeoutMs = 25000, warmUp = fals
       });
     }
 
-    return { html: await page.content(), status, hardBlocked: false };
+    let html = await page.content();
+    if (capture) html = embedCaptured(html, await capture.result());
+    return { html, status, hardBlocked: false };
   } catch (err) {
     logger.error({ url, err: err.message }, '[browserFetch] sayfa açılamadı');
     return { html: null, status: null, hardBlocked: false };

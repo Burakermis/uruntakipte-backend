@@ -12,7 +12,7 @@ npm start
 
 ## Docker ile dağıtım
 
-API ve worker **aynı imajı** kullanır (`Dockerfile`), yalnızca komut değişir. İmaj Playwright'ın resmi imajı üzerine kurulur (Chromium hazır) ve H&M gibi görünür pencere isteyen markalar için sanal ekran (Xvfb) başlatır.
+API ve worker **aynı imajı** kullanır (`Dockerfile`), yalnızca komut değişir. İmaj Playwright'ın resmi imajı üzerine kurulur (Chromium hazır).
 
 ```bash
 docker build -t uruntakipte-backend .

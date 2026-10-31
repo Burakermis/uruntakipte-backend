@@ -1,0 +1,10 @@
+{
+  "_not": "test-live.js bu URL'leri CANLI sitelerden çeker. Ürün kalkarsa/URL ölürse buradan güncelle (her marka için şu an satışta olan bir ürün).",
+  "zara": "https://www.zara.com/tr/tr/aaron-levine-x-zara-uzun-kollu-t-shirt-p01887320.html",
+  "pullandbear": "https://www.pullandbear.com/tr/cift-kollu-tisort-l07230571",
+  "bershka": "https://www.bershka.com/tr/baskili-uzun-kollu-dugmeli-yaka-tisort-c0p227531249.html?colorId=711",
+  "mango": "https://shop.mango.com/tr/tr/p/erkek/h%C4%B1rka-ve-kazak/100-yun/ince-triko-100-yun-h%C4%B1rka/37067886/94/00",
+  "massimodutti": "https://www.massimodutti.com/tr/100-pamuklu-uzun-kollu-dugmeli-yaka-tshirt-l00778176",
+  "stradivarius": "https://www.stradivarius.com/tr/desenli-hacimli-pantolon-l01214154?colorId=042",
+  "oysho": "https://www.oysho.com/tr/primaloft-dolgulu-yunlu-diplomatik-cizgili-ceket-l36495749?colorId=444&pelement=234993066&categoryId=1010328003"
+}

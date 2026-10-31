@@ -60,6 +60,11 @@ async function processScrapeJob(job) {
 
   await waitForDomainSlot(url);
   const fetched = await fetchHtml(url, { brandId });
+  if (fetched?.notFound) {
+    return {
+      error: { status: 404, body: { error: 'PRODUCT_NOT_FOUND', message: 'Bu ürün sayfası artık mevcut değil.' } },
+    };
+  }
   if (!fetched) {
     return {
       error: {

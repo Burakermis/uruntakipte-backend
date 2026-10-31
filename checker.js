@@ -8,6 +8,64 @@ const notificationStore = require('./store/notificationStore');
 const logger = require('./logger');
 const { sendExpoPush } = require('./notifications/expoPush');
 const { NOT_CURRENTLY_PURCHASABLE, FAILURE_NOTIFY_THRESHOLD } = require('./constants');
+const { decideGone } = require('./goneDecision');
+const { captureMessage } = require('./monitoring/sentry');
+
+// Marka şalteri tetiklenince her hedef için ayrı uyarı yağmasın: marka başına en fazla saatte bir Sentry mesajı.
+const HOLD_ALERT_INTERVAL_MS = 60 * 60 * 1000;
+const lastHoldAlertAt = new Map();
+
+function alertHeldBrand(brand, context) {
+  const now = Date.now();
+  if (now - (lastHoldAlertAt.get(brand) || 0) < HOLD_ALERT_INTERVAL_MS) return;
+  lastHoldAlertAt.set(brand, now);
+  captureMessage(`[checker] ${brand}: hedeflerin büyük kısmı aynı anda 404 veriyor, abonelikler kapatılmıyor (site sorunu?)`, 'error', context);
+}
+
+// Ürün sayfası yok (404/410 ya da "Sayfa Bulunamadı") görüldü. Tek bir 404 abonelikleri KAPATMAZ: kesintisiz bir 404
+// serisi izlenir ve karar goneDecision.js'te verilir (yeterli kontrol + süre, marka şalteri). Seri yalnızca başarılı
+// bir kontrolle sıfırlanır; arada engel/zaman aşımı gelirse seri sürer. Hata sayacı (consecutiveFailures) ARTMAZ,
+// kontrol normal sıklıkta devam eder.
+async function handleProductGone(target, status) {
+  const now = Date.now();
+  const firstSeenAt = target.notFoundSince ? new Date(target.notFoundSince).getTime() : now;
+  const count = target.notFoundCount + 1;
+  await trackedTargetStore.update(target.id, {
+    notFoundSince: new Date(firstSeenAt).toISOString(),
+    notFoundCount: count,
+    lastCheckStatus: 'NOT_FOUND',
+    lastAttemptAt: new Date(now).toISOString(),
+  });
+
+  const decision = await decideGone({ status, count, firstSeenAt, now }, () => trackedTargetStore.notFoundStatsByBrand(target.brand));
+  if (decision === 'remove') return removeGoneTarget(target, status);
+
+  if (decision === 'hold') {
+    logger.warn({ targetId: target.id, brand: target.brand, count }, '[checker] 404 serisi var ama marka genelinde sorun görünüyor, abonelikler korunuyor');
+    alertHeldBrand(target.brand, { targetId: target.id, count });
+  }
+  return { id: target.id, ok: false, reason: 'NOT_FOUND', pending: decision };
+}
+
+// Aboneliklerin kapatılması: removed_at YAZILMAZ — bu kullanıcının kendi kararı değil, ücretsiz plandaki "çıkardıktan
+// sonra 48 saat bekle" kuralını tetiklememeli.
+async function removeGoneTarget(target, status) {
+  await trackedTargetStore.update(target.id, { active: false, notFoundSince: null, notFoundCount: 0 });
+  const subscriptions = await subscriptionStore.listByTarget(target.id);
+  for (const sub of subscriptions) {
+    await subscriptionStore.update(sub.id, { active: false });
+    try {
+      await sendNotificationForEvent(sub, target, null, { type: 'product_removed' });
+    } catch (err) {
+      logger.warn({ err: err.message, targetId: target.id }, '[checker] "ürün kaldırıldı" bildirimi gönderilemedi');
+    }
+  }
+  logger.warn(
+    { targetId: target.id, brand: target.brand, status, users: subscriptions.length },
+    '[checker] ürün sayfası yok, takip sonlandırıldı'
+  );
+  return { id: target.id, ok: false, reason: 'NOT_FOUND', removedSubscriptions: subscriptions.length };
+}
 
 // Başarısız taramayı kaydeder; ardışık hata eşiğe (FAILURE_NOTIFY_THRESHOLD) ilk kez ulaşınca bu ürünü takip
 // eden her kullanıcıya BİR KEZ "takip edilemiyor" bildirimi gönderir (ürün kaldırılmış / sayfa değişmiş / engellenmiş
@@ -51,6 +109,7 @@ async function checkTrackedTarget(target) {
   }
 
   const fetched = await fetchHtml(target.url, { brandId: brand.id });
+  if (fetched?.notFound) return handleProductGone(target, fetched.status);
   if (!fetched) {
     await recordFailure(target, 'FETCH_FAILED');
     return { id: target.id, ok: false, reason: 'FETCH_FAILED' };
@@ -72,6 +131,8 @@ async function checkTrackedTarget(target) {
     lastCheckStatus: 'ok',
     consecutiveFailures: 0,
     failureNotifiedAt: null, // düzeldi: yeniden bozulursa tekrar uyarılabilir
+    notFoundSince: null, // 404 serisi bozuldu: sayfa var
+    notFoundCount: 0,
   });
 
   // Fiyat geçmişi HEDEF bazında (kullanıcı sayısından bağımsız) ve SADECE
@@ -140,7 +201,10 @@ async function checkTrackedTarget(target) {
 async function sendNotificationForEvent(subscription, target, variant, event) {
   let title;
   let body;
-  if (event.type === 'tracking_failed') {
+  if (event.type === 'product_removed') {
+    title = `${target.name || 'Ürün'} artık satışta değil`;
+    body = 'Mağaza sayfası bulunamadı; ürün kaldırılmış olabilir. Takip listenden çıkardık.';
+  } else if (event.type === 'tracking_failed') {
     title = `${target.name || 'Ürün'} takip edilemiyor`;
     body = 'Mağaza sayfasına bir süredir ulaşamıyoruz. Ürün kaldırılmış ya da sayfa değişmiş olabilir; düzelirse takip kendiliğinden devam eder.';
   } else if (event.type === 'price_drop') {

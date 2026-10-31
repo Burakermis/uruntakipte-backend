@@ -1,5 +1,4 @@
 const zara = require('./brands/zara');
-const hm = require('./brands/hm');
 const pullandbear = require('./brands/pullandbear');
 const bershka = require('./brands/bershka');
 const mango = require('./brands/mango');
@@ -10,7 +9,7 @@ const oysho = require('./brands/oysho');
 // Yeni bir marka eklemek için: brands/<marka>.js dosyasını
 // { id, label, hostnames, parse(html, url) } şeklini dolduracak şekilde
 // yaz, aşağıdaki listeye ekle. Başka hiçbir yeri değiştirmen gerekmez.
-const BRANDS = [zara, hm, pullandbear, bershka, mango, massimodutti, stradivarius, oysho];
+const BRANDS = [zara, pullandbear, bershka, mango, massimodutti, stradivarius, oysho];
 
 function normalizeHostname(hostname) {
   return hostname.replace(/^www\./, '').toLowerCase();
@@ -70,10 +69,6 @@ function normalizeVariantColors(variants) {
 const DEFAULT_FETCH_PROFILE = {
   plainFetchWorks: false,
   flattenShadowDom: false,
-  // true: stealth'siz, pencereli, otomasyon bayrakları kapalı ayrı bir
-  // tarayıcı kullan (bkz. browserFetch.js launchBrowser) — Akamai'nin
-  // headless/stealth'i tanıdığı markalar için (H&M).
-  headed: false,
   // Küçük (engel gibi görünen) bir belge bu süreden sonra hâlâ sürüyorsa
   // beklemeyi kes (bkz. browserFetch.js BLOCK_GRACE_MS). null: varsayılan.
   blockGraceMs: null,
@@ -144,8 +139,8 @@ function resolveProductFromHtml({ url, html }) {
     checkedAt: parsed.checkedAt,
     variants,
     colors: groupVariantsByColor(variants),
-    // H&M gibi renk-başına-ayrı-sayfa modeli kullanan markalarda kardeş
-    // renklerin URL'leri (bkz. brands/hm.js). Bu modeli kullanmayan
+    // Renk-başına-ayrı-sayfa modeli kullanan markalarda kardeş renklerin
+    // URL'leri (bkz. brands/bershka.js). Bu modeli kullanmayan
     // markalarda (Zara) undefined kalır.
     relatedColors: parsed.relatedColors,
   };

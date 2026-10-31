@@ -27,6 +27,8 @@ function mapRow(row) {
     lastAttemptAt: row.last_attempt_at ? row.last_attempt_at.toISOString() : null,
     lastCheckStatus: row.last_check_status,
     failureNotifiedAt: row.failure_notified_at ? row.failure_notified_at.toISOString() : null,
+    notFoundSince: row.not_found_since ? row.not_found_since.toISOString() : null,
+    notFoundCount: row.not_found_count,
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -101,6 +103,8 @@ const COLUMN_MAP = {
   lastAttemptAt: 'last_attempt_at',
   lastCheckStatus: 'last_check_status',
   failureNotifiedAt: 'failure_notified_at',
+  notFoundSince: 'not_found_since',
+  notFoundCount: 'not_found_count',
 };
 
 async function update(id, patch) {
@@ -134,4 +138,14 @@ async function claimAttempt(target) {
   return rows.length > 0;
 }
 
-module.exports = { findByKey, findById, findByIds, create, addAliasKey, listActive, update, claimAttempt };
+// Markanın aktif hedefleri içinde kaçının şu an 404 serisinde olduğu (bkz. goneDecision.js marka şalteri).
+async function notFoundStatsByBrand(brand) {
+  const { rows } = await db.query(
+    `SELECT count(*)::int AS active, count(*) FILTER (WHERE not_found_count > 0)::int AS suspects
+     FROM tracked_targets WHERE active = true AND brand IS NOT DISTINCT FROM $1`,
+    [brand ?? null]
+  );
+  return rows[0];
+}
+
+module.exports = { notFoundStatsByBrand, findByKey, findById, findByIds, create, addAliasKey, listActive, update, claimAttempt };
