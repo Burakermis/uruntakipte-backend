@@ -9,6 +9,31 @@ const logger = require('./logger');
 const { sendExpoPush } = require('./notifications/expoPush');
 const { NOT_CURRENTLY_PURCHASABLE, FAILURE_NOTIFY_THRESHOLD } = require('./constants');
 
+// Ürün sayfası artık yok (404/410 ya da "Sayfa Bulunamadı"): hata sayacı/geri çekilme yerine abonelikleri hemen
+// kapatır ve kullanıcıları bilgilendirir. Abonelik kapatılırken removed_at YAZILMAZ: bu, kullanıcının kendi
+// kararı değil; ücretsiz plandaki "çıkardıktan sonra 48 saat bekle" kuralını tetiklememeli.
+async function handleProductGone(target, status) {
+  await trackedTargetStore.update(target.id, {
+    active: false,
+    lastCheckStatus: 'NOT_FOUND',
+    lastAttemptAt: new Date().toISOString(),
+  });
+  const subscriptions = await subscriptionStore.listByTarget(target.id);
+  for (const sub of subscriptions) {
+    await subscriptionStore.update(sub.id, { active: false });
+    try {
+      await sendNotificationForEvent(sub, target, null, { type: 'product_removed' });
+    } catch (err) {
+      logger.warn({ err: err.message, targetId: target.id }, '[checker] "ürün kaldırıldı" bildirimi gönderilemedi');
+    }
+  }
+  logger.warn(
+    { targetId: target.id, brand: target.brand, status, users: subscriptions.length },
+    '[checker] ürün sayfası yok, takip sonlandırıldı'
+  );
+  return { id: target.id, ok: false, reason: 'NOT_FOUND', removedSubscriptions: subscriptions.length };
+}
+
 // Başarısız taramayı kaydeder; ardışık hata eşiğe (FAILURE_NOTIFY_THRESHOLD) ilk kez ulaşınca bu ürünü takip
 // eden her kullanıcıya BİR KEZ "takip edilemiyor" bildirimi gönderir (ürün kaldırılmış / sayfa değişmiş / engellenmiş
 // olabilir). Bildirim hatası taramayı etkilemez.
@@ -51,6 +76,7 @@ async function checkTrackedTarget(target) {
   }
 
   const fetched = await fetchHtml(target.url, { brandId: brand.id });
+  if (fetched?.notFound) return handleProductGone(target, fetched.status);
   if (!fetched) {
     await recordFailure(target, 'FETCH_FAILED');
     return { id: target.id, ok: false, reason: 'FETCH_FAILED' };
@@ -140,7 +166,10 @@ async function checkTrackedTarget(target) {
 async function sendNotificationForEvent(subscription, target, variant, event) {
   let title;
   let body;
-  if (event.type === 'tracking_failed') {
+  if (event.type === 'product_removed') {
+    title = `${target.name || 'Ürün'} artık satışta değil`;
+    body = 'Mağaza sayfası bulunamadı; ürün kaldırılmış olabilir. Takip listenden çıkardık.';
+  } else if (event.type === 'tracking_failed') {
     title = `${target.name || 'Ürün'} takip edilemiyor`;
     body = 'Mağaza sayfasına bir süredir ulaşamıyoruz. Ürün kaldırılmış ya da sayfa değişmiş olabilir; düzelirse takip kendiliğinden devam eder.';
   } else if (event.type === 'price_drop') {

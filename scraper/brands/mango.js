@@ -36,14 +36,22 @@ function classifySizeAvailability($button) {
   return 'in_stock';
 }
 
-// İndirimli ürünlerde fiyat İKİ ayrı blok olarak geliyor: üstü çizili eski
-// fiyat ve "finalPrice" sınıfıyla işaretli güncel fiyat (bkz. gerçek örnek:
-// "SinglePrice-module__y_asRG__finalPrice" sınıflı span). Bu sınıf varsa onu
-// önceliklendiriyoruz — DOM sırasına (son eşleşen eleman) güvenmek yerine
-// açıkça "bu güncel fiyat" diyen sinyali kullanmak indirimsiz/indirimli her
-// iki durumda da daha güvenilir. "finalPrice" yoksa (indirimsiz ürün) tek
-// fiyat bloğu kalır, en içteki (son eşleşen) span'e düşülür.
+// Fiyat: Mango schema.org işaretlemesini (itemprop="price" content="3999.99")
+// sayfada tutuyor — derleme-bazlı CSS sınıflarından (hash'li, her deploy'da
+// değişir; 2026-10'da değişti ve tüm canlı Mango taramaları PARSE_FAILED oldu)
+// çok daha kararlı. İndirimli üründe iki fiyat var (eski + güncel): güncel
+// olan her zaman daha düşüktür, bu yüzden en küçüğünü alıyoruz.
+// Yedek: eski sınıf tabanlı okuma (itemprop'u olmayan eski sayfalar/fixture'lar).
 function extractPrice($) {
+  const prices = $('[itemprop="price"]')
+    .map((_, el) => Number($(el).attr('content') ?? $(el).text().replace(/[^\d.]/g, '')))
+    .get()
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (prices.length > 0) {
+    const currency = $('[itemprop="priceCurrency"]').first().attr('content') || 'TRY';
+    return { price: Math.min(...prices), currency };
+  }
+
   const finalPriceEl = $('[class*="SinglePrice-module"][class*="finalPrice"]').first();
   const text = finalPriceEl.length
     ? finalPriceEl.text().trim()
@@ -51,11 +59,24 @@ function extractPrice($) {
   return parseTryPrice(text);
 }
 
+// Beden etiketi: butonun içindeki ilk "yaprak" metin (S, M, XL...). Aynı butonda
+// "Mevcut değil. İstiyorum!" gibi ekran-okuyucu metinleri de oluyor ama hep
+// etiketten SONRA geliyor; sınıf adına bağımlı değil.
+function sizeLabel($button) {
+  const leaf = $button
+    .find('*')
+    .filter((_, el) => el.children.every((c) => c.type === 'text'))
+    .map((_, el) => el.children.map((c) => c.data).join('').trim())
+    .get()
+    .find(Boolean);
+  return leaf || $button.contents().first().text().trim();
+}
+
 function extractSizes($) {
   const sizes = [];
   $('button[id^="product.sizeSelector."]').each((_, el) => {
     const $el = $(el);
-    const label = $el.find('[class*="SizeLabel-module"]').first().text().trim();
+    const label = sizeLabel($el);
     if (label) {
       sizes.push({
         size: label,
@@ -81,10 +102,20 @@ function parseUrlSegments(url) {
   return { productId: null, colorId: null };
 }
 
+// Renk seçici görselleri "Renk <ad>" / "Seçilen renk <ad>" alt metni taşıyor
+// (erişilebilirlik metni — sınıf adlarından çok daha kararlı).
+const COLOR_ALT = /^(Seçilen\s+)?renk\s+(.+)$/i;
+
 function extractColorName($) {
-  const img = $('[class*="ColorBullet-module"][class*="selected"] img').first();
-  const alt = img.attr('alt') || '';
-  return alt.replace(/^Seçilen renk\s+/i, '').trim() || null;
+  const alt = $('img[alt]')
+    .map((_, el) => $(el).attr('alt') || '')
+    .get()
+    .find((a) => /^Seçilen\s+renk\s+/i.test(a));
+  if (alt) return alt.replace(/^Seçilen\s+renk\s+/i, '').trim() || null;
+
+  // Yedek: eski sınıf tabanlı seçim.
+  const legacy = $('[class*="ColorBullet-module"][class*="selected"] img').first().attr('alt') || '';
+  return legacy.replace(/^Seçilen renk\s+/i, '').trim() || null;
 }
 
 // Seçili renk sayfada bir <a> değil, düz bir <span> olarak duruyor (zaten
@@ -92,25 +123,27 @@ function extractColorName($) {
 // sayfalara link veriyor. H&M/Bershka'daki relatedColors modeliyle aynı fikir.
 function extractRelatedColors($, baseUrl) {
   const colors = [];
-  $('[class*="ColorList-module"][class*="colorsList"] > li').each((_, li) => {
-    const $li = $(li);
-    const $a = $li.find('a').first();
-    const $img = $li.find('img').first();
-    const altRaw = $img.attr('alt') || '';
-    const selected = /^Seçilen renk/i.test(altRaw) || $li.find('[class*="selected"]').length > 0;
-    const name = altRaw.replace(/^Seçilen renk\s+/i, '').replace(/^Renk\s+/i, '').trim();
-    if (!name) return;
+  const seen = new Set();
+  $('img[alt]').each((_, img) => {
+    const $img = $(img);
+    const match = ($img.attr('alt') || '').match(COLOR_ALT);
+    if (!match) return;
+    const name = match[2].trim();
+    const selected = !!match[1];
+    const $li = $img.closest('li');
+    if (!$li.length || seen.has(name)) return; // öneri/başka liste görselleri li içinde olmayabilir
+    seen.add(name);
 
+    const href = $li.find('a[href]').first().attr('href');
     let url = baseUrl;
-    if ($a.length && $a.attr('href')) {
+    if (href) {
       try {
-        url = new URL($a.attr('href'), baseUrl).toString();
+        url = new URL(href, baseUrl).toString();
       } catch {
         /* baseUrl geçersizse href'i olduğu gibi bırak */
       }
     }
-    const { colorId } = parseUrlSegments(url);
-    colors.push({ name, colorId, url, selected });
+    colors.push({ name, colorId: parseUrlSegments(url).colorId, url, selected });
   });
   return colors;
 }

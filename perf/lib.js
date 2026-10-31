@@ -20,14 +20,13 @@ function assertScratchDb() {
   }
 }
 
-// Gerçek trafiğe yakın marka dağılımı (yüzde). H&M dahil hepsi.
+// Gerçek trafiğe yakın marka dağılımı (yüzde).
 const BRAND_MIX = [
-  ['zara', 30],
-  ['mango', 12],
-  ['pullandbear', 12],
+  ['zara', 36],
+  ['mango', 14],
+  ['pullandbear', 14],
   ['bershka', 10],
   ['stradivarius', 10],
-  ['hm', 10],
   ['massimodutti', 8],
   ['oysho', 8],
 ];
@@ -36,7 +35,6 @@ function urlFor(brand, i) {
   const n8 = String(10000000 + i);
   switch (brand) {
     case 'zara': return `https://www.zara.com/tr/tr/perf-${i}-p${n8}.html`;
-    case 'hm': return `https://www2.hm.com/tr_tr/productpage.${String(1000000000 + i)}.html`;
     case 'pullandbear': return `https://www.pullandbear.com/tr/perf-${i}-l${n8}`;
     case 'bershka': return `https://www.bershka.com/tr/perf-${i}-c0p${String(200000000 + i)}.html`;
     case 'mango': return `https://shop.mango.com/tr/tr/p/erkek/gomlek/perf-${i}/${n8}/56/00`;
